@@ -25,7 +25,7 @@
 | [本地验证](#sec-verify) | 离线冒烟、端到端复核、改完代码怎么确认生效 |
 | [关于禅道 REST API v1](#sec-api) | 实测过的接口事实与坑 |
 | [已知限制](#sec-limits) | 边界与风险 |
-| [附录 A](#sec-defects) | 开发中发现并修掉的 19 个真实缺陷 |
+| [附录 A](#sec-defects) | 开发中发现并修掉的 20 个真实缺陷 |
 | [附录 B](#sec-probe) | 研发需求字段的只读实测（2026-10） |
 
 ---
@@ -447,7 +447,7 @@ dsh --profile web --dump-config | Select-String -Pattern 'zentao' -Context 1,1
 
 - **登录**：`POST tokens` → `{ token }`，之后每个请求带 `Token` 头。
 - **任务列表**：`GET tasks?page=N` —— 该参数在禅道上表现为「每页条数」，**不传只返回 1 条**。
-- **Bug / 需求没有「按账号的全局列表」**：只能 `GET products` 拿到产品后逐个 `GET products/{id}/bugs|stories` 再按 `assignedTo` 过滤。因此浮层默认登录后只自动加载「任务」（快），Bug/需求点「刷新」时才聚合，且最多扫描 30 个产品（并发 4），单个产品失败会被跳过而不是整体失败。
+- **Bug / 需求没有「按账号的全局列表」**：只能 `GET products` 拿到产品后逐个 `GET products/{id}/bugs|stories` 再按 `assignedTo` 过滤。因此浮层默认登录后只自动加载「任务」（快），切换到 Bug/需求页签时会按需聚合加载；最多扫描 30 个产品（并发 4），单个产品失败会被跳过而不是整体失败。
 - **详情**：`GET tasks|bugs|stories/{id}`（详情响应是**单数键** `{ task: {…} }`）。
 - **开始任务**：`POST tasks/{id}/start`（body `{ realStarted, consumed?, left? }`）—— **恒返回 200 + 空响应体**，必须回读 `GET tasks/{id}` 的 `status` 才知道有没有生效。
 - **完成任务**：`POST tasks/{id}/finish`（body 必填 `realStarted` + `finishedDate`，缺任一个都是 HTTP 400（`『实际开始』不能为空。` / `『实际完成』不能为空。`），本次耗时用 `currentConsumed`、累计用 `consumed`）—— 同样**恒返回 200 + 空响应体**，一样要回读。
@@ -465,12 +465,12 @@ dsh --profile web --dump-config | Select-String -Pattern 'zentao' -Context 1,1
 - **「用默认程序打开」会在本机落文件**：宿主把附件下载到 `%TEMP%\dsh-zentao-workbench\` 再交系统打开（不会自动清理），扩展名走白名单、`.exe`/`.bat`/`.lnk` 在下载前就被拒绝。请只对你自己认可的附件点这个按钮。
 - 「处理」建出的会话**是否自动切到前台**取决于 `uiWorkspace` 服务是否可用（DSH Web 常规情况下可用，启动时会打印一行 `[zentao-workbench] uiWorkspace=ready|unavailable`）。不可用时退化为 `sessions.create({ workspaceId })`，会话仍会带着提示词任务跑起来，但需要你在左侧列表里手动点开。
 - **自有路由没有 DSH 的 admission 门**：`GET /` 的登录 Cookie 校验只保护首页（`authorizeIndex`），挂在同一 webServer 上的 `POST /zentao-workbench/*` 不受它保护。本插件只能做同源校验（`Origin`/`Sec-Fetch-Site`），**挡不住本机其它进程直接 POST**。因为它监听 `127.0.0.1` 且只暴露「读禅道 + 登录」，风险面可控；若你不接受这个前提，就别在有不可信本地进程的机器上开 DSH。
-- **「AI 分析」跟随 DSH 的默认模型**：它先读 `ctx.reflect.get('agentDefaultModel').currentSelection()`（就是 DSH 界面里选中的那个 provider / model），只有在对应 provider 没注册时才退化成自动挑一条便宜路由并说明原因；profile 里连一条可用路由都没有时返回 `llm-unavailable` 并提示先配模型。每次分析是一次真实模型调用（输出上限 900 tokens、超时 60 秒），结论由模型给出、**仅供参考**，发出去的提示词里也标注了「由哪个模型给出」。
+- **「AI 分析」跟随 DSH 的默认模型**：它先读 `ctx.reflect.get('agentDefaultModel').currentSelection()`（就是 DSH 界面里选中的那个 provider / model），只有在对应 provider 没注册时才退化成自动挑一条便宜路由并说明原因；profile 里连一条可用路由都没有时返回 `llm-unavailable` 并提示先配模型。每次分析是一次真实模型调用（输出上限 4000 tokens、超时 60 秒），结论由模型给出、**仅供参考**，发出去的提示词里也标注了「由哪个模型给出」。
 - **浮层能否出现必须在界面上确认**：组装树与两侧离线冒烟都已通过，但正在运行的 `desktop` profile 由桌面应用独占管理，改完必须重启 DSH 才会加载新插件。
 
 ---
 
-## 附录 A：开发中发现并修掉的 19 个真实缺陷 <a id="sec-defects"></a>
+## 附录 A：开发中发现并修掉的 20 个真实缺陷 <a id="sec-defects"></a>
 
 记录下来，避免以后再踩：
 
