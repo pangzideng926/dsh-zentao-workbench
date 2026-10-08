@@ -134,7 +134,14 @@ try {
     $whole = (& curl.exe -s -o $mp4Tmp -D $mp4Hdr -w '%{http_code} %{content_type} %{size_download}' $mp4Base) -split ' '
     $wholeHdr = Get-Content $mp4Hdr -Raw
     Write-Host "mp4 代理（整份）：HTTP $($whole[0]) type=$($whole[1]) size=$($whole[2]) accept-ranges=$(($wholeHdr -match '(?im)^accept-ranges:\s*bytes'))"
-    $okWhole = $whole[0] -eq '200' -and $whole[1] -like 'video/mp4*' -and [int]$whole[2] -gt 1000000 -and $wholeHdr -match '(?im)^accept-ranges:\s*bytes'
+    # 附件 id 会过期（同一个 file-read-N 在禅道里可能换成了别的文件），所以「是不是视频」不再当硬断言：
+    # 硬断言只留代理行为本身（200 + accept-ranges: bytes + 有实体）；确实拿到视频时才额外要求类型归一化成 video/mp4。
+    $isVideo = $whole[1] -like 'video/*'
+    if (-not $isVideo) {
+      Write-Host "注意：$mp4Name 当前返回的是 $($whole[1])（不是视频），本次只验了 Range 代理行为；要验 video/mp4 归一化请用 DZW_E2E_MP4 指一个真实 mp4 附件"
+    }
+    $okWhole = $whole[0] -eq '200' -and [int]$whole[2] -gt 100000 -and $wholeHdr -match '(?im)^accept-ranges:\s*bytes'
+    if ($isVideo) { $okWhole = $okWhole -and $whole[1] -like 'video/mp4*' }
 
     $part = (& curl.exe -s -o $mp4Tmp -D $mp4Hdr -w '%{http_code} %{size_download}' -H 'Range: bytes=0-1023' $mp4Base) -split ' '
     $partHdr = Get-Content $mp4Hdr -Raw

@@ -254,7 +254,7 @@ const analyzeReply = {
   questions: ['只有「筛选」入口会触发吗？'],
   provider: 'deepseek',
   model: 'deepseek-flash',
-  routeSource: 'auto',
+  routeSource: 'dsh',
   analyzedAt: '2026-10-08T00:00:00.000Z',
 };
 const rpc = {
@@ -506,6 +506,11 @@ ok(
     /\.dzw-analysis\s*\{[^}]*border-radius:\s*var\(--dsw-radius-xs/.test(cssText) &&
     /\.dzw-analysis-tag\s*\{[^}]*font-weight:\s*600/.test(cssText),
   cssText.match(/\.dzw-analysis\s*\{[^}]*\}/)?.[0],
+);
+ok(
+  '回退说明的样式用可读的 label-secondary（不引新令牌）',
+  /\.dzw-analysis-note\s*\{[^}]*color:\s*var\(--dsw-alias-label-secondary/.test(cssText),
+  cssText.match(/\.dzw-analysis-note\s*\{[^}]*\}/)?.[0],
 );
 ok(
   '视频附件样式存在（卡片里高度 190px 的播放器 + 大屏预览同样按视口缩放）',
@@ -809,6 +814,20 @@ ok(
   textOf(analysisBlock),
 );
 ok('有预判的那条按钮变成「重新分析」（只有 #42 分析过 → 1 个）', exactButtons(tree, '重新分析').length === 1, exactButtons(tree, '重新分析').length);
+ok(
+  '预判块标出模型来源（跟随 DSH 默认模型）',
+  textOf(analysisBlock).includes('deepseek/deepseek-flash（DSH 默认模型）'),
+  textOf(analysisBlock),
+);
+tree = renderPass(T({ analyses: { 'task-42': { ...analyzeReply, truncated: true } } }));
+await flush();
+ok(
+  '输出被截断时预判块如实标注',
+  textOf(findByClass(tree, 'dzw-analysis')).includes('输出可能被截断'),
+  textOf(findByClass(tree, 'dzw-analysis')),
+);
+tree = renderPass(T({ analyses: { 'task-42': analyzeReply } }));
+await flush();
 
 // 带预判再点「处理」：提示词要同时含正文、附件、线索与 AI 预判。
 sentPrompts.length = 0;
@@ -832,6 +851,11 @@ ok('提示词含 AI 预判段（类别 + 一句话 + 步骤 + 待确认）', (()
     text.includes('待确认：只有「筛选」入口会触发吗？')
   );
 })(), sentPrompts[0]?.slice(0, 900));
+ok(
+  '提示词里写明预判由哪个模型给出',
+  (sentPrompts[0] ?? '').includes('由 deepseek/deepseek-flash（DSH 默认模型）在'),
+  sentPrompts[0]?.slice(0, 900),
+);
 ok(
   '预判不替代正文：提示词仍带详情正文与附件',
   sentPrompts[0]?.includes('点击筛选即白屏') && sentPrompts[0].includes('### 附件（4 个）'),
@@ -865,6 +889,37 @@ ok(
   JSON.stringify(hookState.setters.filter((entry) => entry.index === 15).map((entry) => entry.value)),
 );
 ok('失败后仍可重试（「重新分析」按钮还在）', exactButtons(tree, '重新分析').length === 1, exactButtons(tree, '重新分析').length);
+
+// 宿主回退到自动挑路由时：界面上要给出说明，提示词也要带上。
+const routeNoteReply = {
+  ...analyzeReply,
+  routeSource: 'auto',
+  routeNote: 'DSH 默认模型 zai-coding-cn/glm-5.3 在当前实例里没有注册，已改为自动挑选一条可用路由。',
+};
+tree = renderPass(T({ analyses: { 'task-42': routeNoteReply } }));
+await flush();
+const routeNoteBlock = findByClass(tree, 'dzw-analysis');
+ok(
+  '回退时预判块标出「自动挑选」并显示说明',
+  routeNoteBlock !== undefined &&
+    textOf(routeNoteBlock).includes('（自动挑选）') &&
+    textOf(routeNoteBlock).includes('已改为自动挑选一条可用路由'),
+  routeNoteBlock === undefined ? '(没有预判块)' : textOf(routeNoteBlock),
+);
+sentPrompts.length = 0;
+caught = undefined;
+try {
+  findByText(tree, '处理').props.onClick();
+  await flush(12);
+} catch (error) {
+  caught = error;
+}
+ok('带回退说明再点「处理」不抛异常', caught === undefined, caught?.stack ?? caught);
+ok(
+  '回退说明也进提示词',
+  (sentPrompts[0] ?? '').includes('- 说明：') && (sentPrompts[0] ?? '').includes('已改为自动挑选一条可用路由'),
+  sentPrompts[0]?.slice(0, 900),
+);
 
 console.log('\n== 6. 交互：切到 Bug 页 + 详情弹窗 ==');
 try {

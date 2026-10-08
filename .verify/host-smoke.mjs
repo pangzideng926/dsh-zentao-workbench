@@ -384,6 +384,12 @@ const registered = {
 let llmMock;
 
 /**
+ * 假的 DSH 默认模型选择服务（`@deepseek-ai/dsh-agent-default-model` 注册为 `agentDefaultModel`，
+ * 读法是 `currentSelection()`）。`undefined` 表示 profile 里没装这个包。
+ */
+let dshModelMock;
+
+/**
  * 忠实复刻 Cordis 的服务可见性规则：
  *
  *  - 只有「注入过」的服务才能从 ctx 读到，否则抛真实报错原文
@@ -417,7 +423,9 @@ function makeCtx(injected) {
     reflect: {
       get(name) {
         registered.reflectGets.push(name);
-        return name === 'llm' ? llmMock : undefined;
+        if (name === 'llm') return llmMock;
+        if (name === 'agentDefaultModel') return dshModelMock;
+        return undefined;
       },
     },
   };
@@ -1163,6 +1171,7 @@ function makeLlm(overrides = {}) {
     providers: overrides.providers ?? [{ id: 'deepseek' }],
     async listProviders() {
       calls.push('listProviders');
+      if (overrides.providersError) throw new Error('no catalog');
       return this.providers;
     },
     async listModels(provider) {
@@ -1248,7 +1257,7 @@ ok(
 );
 const sentText = streamed?.messages?.[0]?.content?.[0]?.text ?? '';
 ok('送进模型的是详情正文（不是空壳）', sentText.includes('编号：10002') && sentText.includes('正文：'), sentText.slice(0, 140));
-ok('maxTokens 有上限', streamed?.maxTokens === 900, String(streamed?.maxTokens));
+ok('maxTokens 有上限', streamed?.maxTokens === 4000, String(streamed?.maxTokens));
 
 // 13.4 模型输出不是 JSON
 llmMock = makeLlm({
@@ -1259,6 +1268,37 @@ llmMock = makeLlm({
 });
 const analyzeBadJson = await call('analyze', { kind: 'task', id: '10002' });
 ok('模型没吐 JSON → llm-parse', analyzeBadJson.ok === false && analyzeBadJson.error.code === 'llm-parse', JSON.stringify(analyzeBadJson));
+
+// 13.4b 带推理的模型（比如 deepseek-flash）常以 max-tokens 收尾：只要 JSON 已吐完就照用
+llmMock = makeLlm({
+  chunks: [
+    { type: 'text-delta', index: 0, text: '{"category":"feature","confidence":70,"headline":"想加导出","reason":"正文写的是新能力","steps":["确认范围"],"questions":[]}' },
+    { type: 'finish', reason: { kind: 'max-tokens' } },
+  ],
+});
+const analyzeTruncatedOk = await call('analyze', { kind: 'task', id: '10002' });
+ok(
+  'finish=max-tokens 但 JSON 已完整 → 照用，不白扔这次调用',
+  analyzeTruncatedOk.ok === true && analyzeTruncatedOk.value?.category === 'feature',
+  JSON.stringify(analyzeTruncatedOk).slice(0, 200),
+);
+ok('截断但可用时标 truncated=true', analyzeTruncatedOk.value?.truncated === true, String(analyzeTruncatedOk.value?.truncated));
+
+llmMock = makeLlm({
+  chunks: [
+    { type: 'text-delta', index: 0, text: '{"category":"feature","confidence":70,"headline":"想加导出' },
+    { type: 'finish', reason: { kind: 'max-tokens' } },
+  ],
+});
+const analyzeTruncatedBad = await call('analyze', { kind: 'task', id: '10002' });
+ok(
+  '截断且 JSON 不完整 → llm-parse，且说清是被 maxTokens 截断',
+  analyzeTruncatedBad.ok === false &&
+    analyzeTruncatedBad.error.code === 'llm-parse' &&
+    analyzeTruncatedBad.error.message.includes('maxTokens=4000') &&
+    analyzeTruncatedBad.error.message.includes('截断'),
+  JSON.stringify(analyzeTruncatedBad).slice(0, 220),
+);
 
 // 13.5 上游失败 / 取消
 llmMock = makeLlm({ chunks: [{ type: 'finish', reason: { kind: 'error', failure: { code: 'RATE_LIMIT', message: '太挤' } } }] });
@@ -1298,7 +1338,140 @@ ok(
 );
 const toolAnalyzeBad = await registered.tool.execute({ action: 'analyze', kind: 'task' }, exec);
 ok('工具 action=analyze 缺 id 给提示', typeof toolAnalyzeBad.content === 'string' && toolAnalyzeBad.content.includes('action=analyze'), toolAnalyzeBad.content.slice(0, 80));
+
+// 13.9 「跟随 DSH」：默认模型来自 agentDefaultModel.currentSelection()
+/** 假的 DSH 默认模型服务（`@deepseek-ai/dsh-agent-default-model` 注册名 agentDefaultModel）。 */
+function makeDefaultModel(selection) {
+  return {
+    currentSelection() {
+      if (selection instanceof Error) throw selection;
+      return selection;
+    },
+  };
+}
+
 llmMock = undefined;
+dshModelMock = makeDefaultModel({ provider: 'zai-coding-cn', model: 'glm-5.3', reasoningEffort: 'high' });
+const analyzeNoLlmWithDefault = await call('analyze', { kind: 'task', id: '10002' });
+ok(
+  '没有 llm 服务时仍报 llm-unavailable（不会因为读默认模型而改变）',
+  analyzeNoLlmWithDefault.ok === false && analyzeNoLlmWithDefault.error.code === 'llm-unavailable',
+  JSON.stringify(analyzeNoLlmWithDefault),
+);
+
+// 13.9.1 DSH 默认模型可用 → 直接跟随它，不去挑便宜的
+const dshLlm = makeLlm({
+  providers: [{ id: 'zai-coding-cn' }, { id: 'deepseek' }],
+  models: {
+    'zai-coding-cn': [{ provider: 'zai-coding-cn', id: 'glm-5.3' }],
+    deepseek: [{ provider: 'deepseek', id: 'deepseek-flash' }],
+  },
+});
+llmMock = dshLlm;
+dshModelMock = makeDefaultModel({ provider: 'zai-coding-cn', model: 'glm-5.3', reasoningEffort: 'high' });
+const analyzeDsh = await call('analyze', { kind: 'task', id: '10002' });
+ok(
+  'DSH 默认模型可用时 analyze 跟随它（routeSource=dsh）',
+  analyzeDsh.ok === true && analyzeDsh.value?.routeSource === 'dsh' && analyzeDsh.value?.provider === 'zai-coding-cn' && analyzeDsh.value?.model === 'glm-5.3',
+  JSON.stringify({ ok: analyzeDsh.ok, provider: analyzeDsh.value?.provider, model: analyzeDsh.value?.model, source: analyzeDsh.value?.routeSource }),
+);
+ok('跟随 DSH 时不再挑 flash', analyzeDsh.value?.model !== 'deepseek-flash', String(analyzeDsh.value?.model));
+ok(
+  '跟随 DSH 时不枚举模型（不走自动挑选那条路）',
+  !dshLlm.calls.some((entry) => typeof entry === 'string' && entry.startsWith('listModels')),
+  JSON.stringify(dshLlm.calls.map((entry) => (typeof entry === 'string' ? entry : 'stream'))),
+);
+ok('跟随 DSH 时不回带 routeNote', analyzeDsh.value?.routeNote === undefined, String(analyzeDsh.value?.routeNote));
+ok("读默认模型走 reflect.get('agentDefaultModel')（同样不必写进 inject）", registered.reflectGets.includes('agentDefaultModel'), JSON.stringify(registered.reflectGets.slice(-3)));
+const dshStreamed = dshLlm.calls.find((entry) => typeof entry === 'object' && entry !== null && 'messages' in entry);
+ok(
+  '真正的 stream 用的是 DSH 默认模型',
+  dshStreamed?.provider === 'zai-coding-cn' && dshStreamed?.model === 'glm-5.3',
+  JSON.stringify({ provider: dshStreamed?.provider, model: dshStreamed?.model }),
+);
+
+// 13.9.2 DSH 默认模型的 provider 没注册 → 回退自动挑选 + 说明
+llmMock = makeLlm();
+dshModelMock = makeDefaultModel({ provider: 'not-there', model: 'x-1' });
+const analyzeFallback = await call('analyze', { kind: 'task', id: '10002' });
+ok(
+  'DSH 默认模型的 provider 没注册 → 回退 auto 且挑 flash',
+  analyzeFallback.ok === true && analyzeFallback.value?.routeSource === 'auto' && analyzeFallback.value?.model === 'deepseek-flash',
+  JSON.stringify({ ok: analyzeFallback.ok, model: analyzeFallback.value?.model, source: analyzeFallback.value?.routeSource }),
+);
+ok(
+  '回退时回带 routeNote 说明原委',
+  typeof analyzeFallback.value?.routeNote === 'string' && analyzeFallback.value.routeNote.includes('not-there/x-1') && analyzeFallback.value.routeNote.includes('没有注册'),
+  String(analyzeFallback.value?.routeNote),
+);
+
+// 13.9.3 provider 枚举失败，但 DSH 有默认模型 → 还是按默认模型发（不武断回退）
+llmMock = makeLlm({ providersError: true, providers: [], models: {} });
+dshModelMock = makeDefaultModel({ provider: 'zai-coding-cn', model: 'glm-5.3' });
+const analyzeBlind = await call('analyze', { kind: 'task', id: '10002' });
+ok(
+  '枚举 provider 失败时仍按 DSH 默认模型发',
+  analyzeBlind.ok === true && analyzeBlind.value?.routeSource === 'dsh' && analyzeBlind.value?.provider === 'zai-coding-cn',
+  JSON.stringify({ ok: analyzeBlind.ok, provider: analyzeBlind.value?.provider, source: analyzeBlind.value?.routeSource }),
+);
+
+// 13.9.4 环境变量优先级最高
+llmMock = makeLlm();
+dshModelMock = makeDefaultModel({ provider: 'zai-coding-cn', model: 'glm-5.3' });
+process.env.DSH_ZENTAO_WORKBENCH_LLM = 'openai/gpt-x';
+const analyzeEnvBeatsDsh = await call('analyze', { kind: 'task', id: '10002' });
+ok(
+  '环境变量优先于 DSH 默认模型',
+  analyzeEnvBeatsDsh.ok === true && analyzeEnvBeatsDsh.value?.provider === 'openai' && analyzeEnvBeatsDsh.value?.model === 'gpt-x' && analyzeEnvBeatsDsh.value?.routeSource === 'env',
+  JSON.stringify({ provider: analyzeEnvBeatsDsh.value?.provider, model: analyzeEnvBeatsDsh.value?.model, source: analyzeEnvBeatsDsh.value?.routeSource }),
+);
+delete process.env.DSH_ZENTAO_WORKBENCH_LLM;
+
+// 13.9.5 默认模型服务读不到 / 抛错 / 形状不对 → 安静回退，不崩
+llmMock = makeLlm();
+dshModelMock = makeDefaultModel(new Error('boom'));
+const analyzeDefaultThrows = await call('analyze', { kind: 'task', id: '10002' });
+ok(
+  '默认模型服务抛错 → 回退 auto 且不崩',
+  analyzeDefaultThrows.ok === true && analyzeDefaultThrows.value?.routeSource === 'auto' && analyzeDefaultThrows.value?.routeNote === undefined,
+  JSON.stringify({ ok: analyzeDefaultThrows.ok, source: analyzeDefaultThrows.value?.routeSource, note: analyzeDefaultThrows.value?.routeNote }),
+);
+dshModelMock = makeDefaultModel({ provider: '', model: '' });
+const analyzeDefaultEmpty = await call('analyze', { kind: 'task', id: '10002' });
+ok(
+  '默认模型选择字段为空 → 回退 auto 且不崩',
+  analyzeDefaultEmpty.ok === true && analyzeDefaultEmpty.value?.routeSource === 'auto' && analyzeDefaultEmpty.value?.routeNote === undefined,
+  JSON.stringify({ ok: analyzeDefaultEmpty.ok, source: analyzeDefaultEmpty.value?.routeSource }),
+);
+dshModelMock = { currentSelection: 'not a function' };
+const analyzeDefaultWrongShape = await call('analyze', { kind: 'task', id: '10002' });
+ok(
+  '默认模型服务形状不对 → 当作没有（回退 auto）',
+  analyzeDefaultWrongShape.ok === true && analyzeDefaultWrongShape.value?.routeSource === 'auto',
+  JSON.stringify({ ok: analyzeDefaultWrongShape.ok, source: analyzeDefaultWrongShape.value?.routeSource }),
+);
+
+// 13.9.6 工具 action=analyze 也要标出模型来源
+llmMock = makeLlm({
+  providers: [{ id: 'zai-coding-cn' }],
+  models: { 'zai-coding-cn': [{ provider: 'zai-coding-cn', id: 'glm-5.3' }] },
+});
+dshModelMock = makeDefaultModel({ provider: 'zai-coding-cn', model: 'glm-5.3' });
+const toolAnalyzeDsh = await registered.tool.execute({ action: 'analyze', kind: 'task', id: '10002' }, exec);
+ok(
+  '工具 action=analyze 标出「DSH 默认模型」',
+  typeof toolAnalyzeDsh.content === 'string' && toolAnalyzeDsh.content.includes('zai-coding-cn/glm-5.3') && toolAnalyzeDsh.content.includes('DSH 默认模型'),
+  toolAnalyzeDsh.content.slice(0, 160),
+);
+dshModelMock = makeDefaultModel({ provider: 'not-there', model: 'x-1' });
+const toolAnalyzeNote = await registered.tool.execute({ action: 'analyze', kind: 'task', id: '10002' }, exec);
+ok(
+  '工具 action=analyze 回退时带上说明',
+  typeof toolAnalyzeNote.content === 'string' && toolAnalyzeNote.content.includes('说明：') && toolAnalyzeNote.content.includes('not-there/x-1'),
+  toolAnalyzeNote.content.slice(0, 200),
+);
+llmMock = undefined;
+dshModelMock = undefined;
 
 rmSync(configDir, { recursive: true, force: true });
 rmSync(openDir, { recursive: true, force: true });
