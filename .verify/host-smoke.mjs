@@ -372,7 +372,16 @@ const registered = {
   effectLabel: undefined,
   webServerRoutes: [],
   injectCalls: [],
+  reflectGets: [],
 };
+
+/**
+ * 假的 llm 服务（AI 预判用）。`undefined` 表示当前实例没有暴露模型服务。
+ * 插件读服务走 `ctx.reflect.get('llm')` —— cordis 的 ReflectService 注释原文是
+ * 「Read a service from the store without the inject requirement」，不需要写进 inject，
+ * 取不到时返回 undefined，所以这里用 Proxy 之外的普通属性复刻即可。
+ */
+let llmMock;
 
 /**
  * 忠实复刻 Cordis 的服务可见性规则：
@@ -403,6 +412,12 @@ function makeCtx(injected) {
       register(tool) {
         registered.tool = tool;
         return () => {};
+      },
+    },
+    reflect: {
+      get(name) {
+        registered.reflectGets.push(name);
+        return name === 'llm' ? llmMock : undefined;
       },
     },
   };
@@ -1130,6 +1145,160 @@ const noExtOpen = await call('openAttachment', { url: 'http://zentao.example.com
 ok('没有扩展名 → bad-request', noExtOpen.ok === false && noExtOpen.error.code === 'bad-request', JSON.stringify(noExtOpen));
 const noUrlOpen = await call('openAttachment', {});
 ok('缺附件地址 → bad-request', noUrlOpen.ok === false && noUrlOpen.error.code === 'bad-request', JSON.stringify(noUrlOpen));
+
+// ---- 13. AI 预判（analyze：读 llm 服务 + 解析模型输出） ----------------------
+console.log('\n== 13. AI 预判（analyze） ==');
+
+/** 造一个假的 llm 服务；overrides 可覆盖 providers / models / chunks。 */
+function makeLlm(overrides = {}) {
+  const calls = [];
+  const models = overrides.models ?? {
+    deepseek: [
+      { provider: 'deepseek', id: 'deepseek-chat' },
+      { provider: 'deepseek', id: 'deepseek-flash' },
+    ],
+  };
+  return {
+    calls,
+    providers: overrides.providers ?? [{ id: 'deepseek' }],
+    async listProviders() {
+      calls.push('listProviders');
+      return this.providers;
+    },
+    async listModels(provider) {
+      calls.push(`listModels:${provider}`);
+      return models[provider] ?? [];
+    },
+    stream(options) {
+      calls.push(options);
+      const chunks = overrides.chunks ?? [
+        { type: 'text-delta', index: 0, text: '```json\n{"category":"optimize",' },
+        { type: 'text-delta', index: 0, text: '"confidence":82,"headline":"列表加载慢",' },
+        {
+          type: 'text-delta',
+          index: 0,
+          text: '"reason":"功能可用但慢","steps":["看慢查询","加索引"],"questions":["是否只在弱网复现"]}\n```\n以上。',
+        },
+        { type: 'finish', reason: { kind: 'stop' } },
+      ];
+      return (async function* chunks_() {
+        for (const chunk of chunks) yield chunk;
+      })();
+    },
+  };
+}
+
+// 13.1 实例没暴露模型服务（reflect.get('llm') 返回 undefined）→ 明确报错，不崩
+llmMock = undefined;
+const analyzeNoLlm = await call('analyze', { kind: 'task', id: '10002' });
+ok(
+  '没有 llm 服务时 analyze 明确报 llm-unavailable',
+  analyzeNoLlm.ok === false && analyzeNoLlm.error.code === 'llm-unavailable',
+  JSON.stringify(analyzeNoLlm),
+);
+ok(
+  "读模型服务走 reflect.get('llm')（不必写进 inject）",
+  registered.reflectGets.includes('llm'),
+  JSON.stringify(registered.reflectGets.slice(0, 3)),
+);
+
+// 13.2 kind / id 校验先于远端读取
+const analyzeBadKind = await call('analyze', { kind: 'nope', id: '10002' });
+ok('analyze kind 非法 → bad-request', analyzeBadKind.ok === false && analyzeBadKind.error.code === 'bad-request', JSON.stringify(analyzeBadKind));
+const analyzeNoId = await call('analyze', { kind: 'task' });
+ok('analyze 缺 id → bad-request', analyzeNoId.ok === false && analyzeNoId.error.code === 'bad-request', JSON.stringify(analyzeNoId));
+
+// 13.3 正常一轮：带 ``` 围栏 + 尾部废话也要能解析
+const llm = makeLlm();
+llmMock = llm;
+const analysis = await call('analyze', { kind: 'task', id: '10002' });
+ok('analyze 返回 ok', analysis.ok === true, JSON.stringify(analysis).slice(0, 300));
+ok('analyze 解析出 category=optimize', analysis.value?.category === 'optimize', JSON.stringify(analysis.value));
+ok('analyze 带中文类别名', analysis.value?.categoryLabel === '体验或性能优化', String(analysis.value?.categoryLabel));
+ok('analyze 置信度取整为 82', analysis.value?.confidence === 82, String(analysis.value?.confidence));
+ok('analyze 步骤数组（2 条，<=5）', Array.isArray(analysis.value?.steps) && analysis.value.steps.length === 2, JSON.stringify(analysis.value?.steps));
+ok('analyze 待确认问题进 questions', analysis.value?.questions?.[0] === '是否只在弱网复现', JSON.stringify(analysis.value?.questions));
+ok(
+  'analyze 回带 kind/id/title',
+  analysis.value?.kind === 'task' && analysis.value?.id === '10002' && analysis.value?.title !== '',
+  JSON.stringify({ kind: analysis.value?.kind, id: analysis.value?.id, title: analysis.value?.title }),
+);
+ok('analyze 回带 analyzedAt（ISO）', typeof analysis.value?.analyzedAt === 'string' && analysis.value.analyzedAt.includes('T'), String(analysis.value?.analyzedAt));
+ok('analyze 记录路由来源 auto', analysis.value?.routeSource === 'auto', String(analysis.value?.routeSource));
+ok(
+  '自动挑便宜路由：优先 flash 模型',
+  analysis.value?.provider === 'deepseek' && analysis.value?.model === 'deepseek-flash',
+  JSON.stringify({ provider: analysis.value?.provider, model: analysis.value?.model }),
+);
+const streamed = llm.calls.find((entry) => typeof entry === 'object' && entry !== null && 'messages' in entry);
+ok(
+  '只发了一次 stream 调用',
+  llm.calls.filter((entry) => typeof entry === 'object' && entry !== null && 'messages' in entry).length === 1,
+  JSON.stringify(llm.calls.map((entry) => (typeof entry === 'string' ? entry : 'stream'))),
+);
+ok(
+  'stream 的 system 写死了「只输出 JSON」的口径',
+  typeof streamed?.system === 'string' && streamed.system.includes('只输出一个 JSON 对象'),
+  String(streamed?.system).slice(0, 60),
+);
+ok(
+  '送进模型的是 user 消息且带 source',
+  streamed?.messages?.[0]?.role === 'user' && streamed?.messages?.[0]?.source?.kind === 'dsh-zentao-workbench',
+  JSON.stringify(streamed?.messages?.[0]?.source),
+);
+const sentText = streamed?.messages?.[0]?.content?.[0]?.text ?? '';
+ok('送进模型的是详情正文（不是空壳）', sentText.includes('编号：10002') && sentText.includes('正文：'), sentText.slice(0, 140));
+ok('maxTokens 有上限', streamed?.maxTokens === 900, String(streamed?.maxTokens));
+
+// 13.4 模型输出不是 JSON
+llmMock = makeLlm({
+  chunks: [
+    { type: 'text-delta', index: 0, text: '抱歉，我不能判断。' },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ],
+});
+const analyzeBadJson = await call('analyze', { kind: 'task', id: '10002' });
+ok('模型没吐 JSON → llm-parse', analyzeBadJson.ok === false && analyzeBadJson.error.code === 'llm-parse', JSON.stringify(analyzeBadJson));
+
+// 13.5 上游失败 / 取消
+llmMock = makeLlm({ chunks: [{ type: 'finish', reason: { kind: 'error', failure: { code: 'RATE_LIMIT', message: '太挤' } } }] });
+const analyzeFailed = await call('analyze', { kind: 'task', id: '10002' });
+ok(
+  '模型失败 → llm-failed 且带上游原因',
+  analyzeFailed.ok === false && analyzeFailed.error.code === 'llm-failed' && analyzeFailed.error.message.includes('RATE_LIMIT') && analyzeFailed.error.message.includes('太挤'),
+  JSON.stringify(analyzeFailed),
+);
+llmMock = makeLlm({ chunks: [{ type: 'finish', reason: { kind: 'aborted' } }] });
+const analyzedAborted = await call('analyze', { kind: 'task', id: '10002' });
+ok('被取消 → llm-aborted', analyzedAborted.ok === false && analyzedAborted.error.code === 'llm-aborted', JSON.stringify(analyzedAborted));
+
+// 13.6 一个 provider 都没有
+llmMock = makeLlm({ providers: [], models: {} });
+const analyzeNoProvider = await call('analyze', { kind: 'task', id: '10002' });
+ok('没有可用路由 → llm-unavailable', analyzeNoProvider.ok === false && analyzeNoProvider.error.code === 'llm-unavailable', JSON.stringify(analyzeNoProvider));
+
+// 13.7 环境变量强制指定路由
+llmMock = makeLlm();
+process.env.DSH_ZENTAO_WORKBENCH_LLM = 'openai/gpt-x';
+const analyzeOverride = await call('analyze', { kind: 'bug', id: '101' });
+ok(
+  'DSH_ZENTAO_WORKBENCH_LLM 覆盖路由（routeSource=env）',
+  analyzeOverride.ok === true && analyzeOverride.value?.provider === 'openai' && analyzeOverride.value?.model === 'gpt-x' && analyzeOverride.value?.routeSource === 'env',
+  JSON.stringify({ ok: analyzeOverride.ok, provider: analyzeOverride.value?.provider, model: analyzeOverride.value?.model, source: analyzeOverride.value?.routeSource }),
+);
+delete process.env.DSH_ZENTAO_WORKBENCH_LLM;
+
+// 13.8 zentao 工具也能做预判
+llmMock = makeLlm();
+const toolAnalyze = await registered.tool.execute({ action: 'analyze', kind: 'task', id: '10002' }, exec);
+ok(
+  '工具 action=analyze 输出中文类别与步骤',
+  typeof toolAnalyze.content === 'string' && toolAnalyze.content.includes('体验或性能优化') && toolAnalyze.content.includes('建议步骤'),
+  toolAnalyze.content.slice(0, 160),
+);
+const toolAnalyzeBad = await registered.tool.execute({ action: 'analyze', kind: 'task' }, exec);
+ok('工具 action=analyze 缺 id 给提示', typeof toolAnalyzeBad.content === 'string' && toolAnalyzeBad.content.includes('action=analyze'), toolAnalyzeBad.content.slice(0, 80));
+llmMock = undefined;
 
 rmSync(configDir, { recursive: true, force: true });
 rmSync(openDir, { recursive: true, force: true });

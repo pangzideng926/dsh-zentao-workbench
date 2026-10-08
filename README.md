@@ -1,8 +1,9 @@
 # dsh-zentao-workbench · 禅道工作台（DSH 插件）
 
-把**你自己的禅道实例**接进 DeepSeek Harness（DSH）的 Web 界面：右下角一个浮层工作台，登录后列出**指派给我**的任务 / Bug / 需求，点一条就能按固定的**开发**预设**新建对话并自动发送处理提示词**。
+把**你自己的禅道实例**接进 DeepSeek Harness（DSH）的 Web 界面：右下角一个浮层工作台，登录后列出**指派给我**的任务 / Bug / 需求，点一条就能**新建对话并自动发送处理提示词**（提示词先要求模型判断这是 Bug 修复 / 体验或性能优化 / 新增需求 / 其它，再按对应套路干活）。
 
 - **详情是悬浮卡片**：点条目标题在工作台左侧浮出卡片（描述 / 研发需求 / 步骤 / 历史，状态与动作**显示中文**），不铺全屏灰色遮罩，页面不压暗。
+- **先分个类再干活**：每条旁边有「AI 分析」按钮，用当前 DSH 实例的模型先判这是 Bug / 优化 / 还是需求（带置信度、一句话、依据和建议步骤），结论会随提示词一起发出去；不点也行，提示词里照样带确定性的字段线索、正文与附件清单。
 - **附件按类型分流**：图片点开放大、视频**点了才播**、PDF 在工作台内预览、ppt/word/excel 交给**电脑上的默认程序**打开。
 - **任务可以直接写回禅道**：置为「开始」、完成并登记耗时、指派给别人 —— 三个动作全部**写后回读确认**，改不动就如实提示，不谎报成功。
 - **模型也能读禅道**：另外注册一个 agent 可调用的 `zentao` 工具，让模型自己拉取和阅读禅道条目。
@@ -24,7 +25,7 @@
 | [本地验证](#sec-verify) | 离线冒烟、端到端复核、改完代码怎么确认生效 |
 | [关于禅道 REST API v1](#sec-api) | 实测过的接口事实与坑 |
 | [已知限制](#sec-limits) | 边界与风险 |
-| [附录 A](#sec-defects) | 开发中发现并修掉的 18 个真实缺陷 |
+| [附录 A](#sec-defects) | 开发中发现并修掉的 19 个真实缺陷 |
 | [附录 B](#sec-probe) | 研发需求字段的只读实测（2026-10） |
 
 ---
@@ -34,7 +35,7 @@
 | 半侧 | 入口 | 内容 |
 | --- | --- | --- |
 | 宿主（Host） | `lib/index.js` | 一条自有 webServer 路由 `POST /zentao-workbench/<endpoint>`（同源校验 + JSON 信封）；一个面向模型的 `zentao` 工具；禅道 v1 REST 客户端与配置落盘 |
-| 浏览器（Client） | `lib/client.js` | 挂在 `shell.overlay` 插槽上的浮层：登录表单、发送目标选择（工作区可切换）、三个分类标签页、条目详情悬浮卡片（含附件区：图片缩略图 / 视频播放器 / PDF 预览 / 默认程序打开）、`处理 / 完成 / 指派 / 复制提示词` 按钮；配色全部走 DSH 的 `--dsw-*` 设计令牌 |
+| 浏览器（Client） | `lib/client.js` | 挂在 `shell.overlay` 插槽上的浮层：登录表单、发送目标选择（工作区可切换）、三个分类标签页、条目详情悬浮卡片（含附件区：图片缩略图 / 视频播放器 / PDF 预览 / 默认程序打开）、`处理 / 完成 / 指派 / 复制提示词 / AI 分析` 按钮；配色全部走 DSH 的 `--dsw-*` 设计令牌 |
 
 浮层在界面上长这样：标题栏是账号 + 「刷新 / 收起」，下面一行是**发送目标**，再下面三个分类标签（任务 / Bug / 需求），每个条目带状态、指派人与截止日期，底部是禅道地址 + 「退出登录」。
 
@@ -136,14 +137,18 @@ dsh plugin --profile web remove dsh-zentao-workbench
 - **任务的研发需求会一并带出来**：`GET tasks/{id}` 在任务挂在需求上时返回 `storyID` / `storyTitle` / `storyStatus` / `storySpec`（需求正文）/ `storyVerify`。`storySpec` / `storyVerify` 进 `sections`（标签「研发需求描述」「研发需求验收标准」，需求正文里的内嵌截图同样被抽进附件并走宿主代理），`story` 给出 `{ id, title, status, statusLabel, link }`，卡片里显示成一行可点的「研发需求：#2001 示例需求（激活）」，直接跳禅道的需求页。
 - **正文以外的散字段进 `meta` 逐条显示**（避免「详情里有、弹窗里没有」）：按 `DETAIL_META_FIELDS` 取任务（所属执行 / 模块 / 类型 / 优先级 / 预计·已耗·剩余工时 / 计划开始 / 实际开始 / 实际完成 / 关闭原因 / 延期）、Bug（所属产品 / 模块 / 类型 / 严重程度 / 关键词 / 影响版本 / 解决方案 / 解决者 / 转入任务）、需求（所属产品 / 模块 / 分类 / 阶段 / 预计工时 / 评审人）。枚举值中文化走 `TYPE_LABEL`（`devel → 开发`）/ `SEVERITY_LABEL`（`3 → 3 轻微`）/ `RESOLUTION_LABEL`（`fixed → 已修复`）/ `STAGE_LABEL`，表里没有的值原样显示，不丢信息。字段名是 2026-10 用真实 Token 对 `GET tasks/{id}` / `bugs/{id}` / `stories/{id}` 逐个核对过的。
 
-### 提示词与职位预设
+### 提示词：先判类别 → 再按类别走套路
 
-每条提示词由「职位设定 + 条目 Markdown + 当前工作区 + 工具指引」拼成。
+界面上**不再有职位选择**，提示词也不再固定成「开发视角」的一套话术 —— 一条 Bug、一条优化和一条新需求，该套的是三套不同的干活方式（这是用户 m04648 的改造：「提示词似乎不对劲 如何优化？原来存在职位 根据职位的。现在没有职位？」）。每条提示词由「抬头 + 条目 Markdown（含正文与附件）+ 字段线索 + AI 预判（可选）+ 当前工作区 + 工具指引」拼成：
 
-**界面上已取消职位选择**（登录表单与已登录区都不再有这个下拉框）：「处理」按钮固定使用**开发**这一套预设，避免选了之后忘了、提示词跑偏：
+1. **抬头（`PROMPT_INTRO`）先要求分类**：读完条目先用一行给出 **Bug 修复 / 体验或性能优化 / 新增需求 / 其它**，并附一句依据；证据不足时直接说缺什么、先问，不要硬猜。
+2. **第二步才是套路**：Bug 修复 → 复现路径 / 根因 / 修复方案与改动点 / 回归范围与自测；体验或性能优化 → 现状与基线 / 先量后改的瓶颈定位 / 优化方案与预期收益 / 回归验证；新增需求 → 目标与验收标准 / 方案与拆分 / 影响面与风险 / 实施顺序；其它 → 先澄清目标再给最小可行的下一步。
+3. **硬要求**：涉及代码先在工作区里找到相关文件再下结论、结论先行、需要拍板的点集中放最后。
+4. **正文与附件真的进提示词了**（旧版本这里是空的）：生成提示词前会先调一次 `fetchDetail`，把 `description`（宿主由 `sections` 合成的纯文本，`lib/index.js:593`）与附件清单写进 `### 描述 / 重现步骤 / 研发需求` 和 `### 附件（N 个）`。旧版只拿得到列表行，而列表行（`normalizeItem`）**根本没有正文字段** —— 所以「提示词里看不到描述」不是没接上，是当时确实取不到。
+5. **字段线索段**（`categoryClues`，确定性判断）：按标题关键词（报错/失败/崩溃… → 更像 Bug；慢/卡/体验… → 更像优化；新增/支持/需求… → 更像需求）、`kind`（Bug 页默认猜 Bug、需求页默认猜需求）、严重程度 / 优先级 / 当前状态给一份线索，并写明「只是线索，判断权在你」，不锁死模型结论。
+6. **AI 预判（可选）**：点过「AI 分析」的条目，会把这套结论追加成 `## AI 预判（工作台按当前模型给出，仅供参考，请自行复核）`（类别 + 置信度 + 一句话 + 依据 + 步骤 + 待确认）。
 
-- **开发**（固定使用）— 定位仓库与改动点、技术方案、影响面、风险、自测计划，并按禅道收尾闭环流程同步禅道。
-- 其余三套文案仍留在代码里（`ROLES`），需要时把 `FIXED_ROLE` 改回 `config.role` 并恢复下拉框即可。
+> 旧的 `ROLES` 四套职位预设与 `FIXED_ROLE = 'dev'` 已删除；`setRole` 端点保留给脚本，界面不再调用。旧版 dev 文案里写死的「按项目《禅道接口.md》的收尾闭环流程」也一并去掉了（换个工作区就指向不存在的文件）。
 
 「处理」成功时会新建一个对话并把提示词原样发出；失败时自动把提示词复制到剪贴板兜底。
 
@@ -157,6 +162,15 @@ dsh plugin --profile web remove dsh-zentao-workbench
 - 路径：E:\Eworkspace\dsh-zentao-workbench
 - 要求：本次分析与改动都在这个工作区内完成，不要切换到其它工作区或目录。
 ```
+
+### 「AI 分析」按钮：先判这是 Bug / 优化 / 还是需求
+
+列表每条右侧除「处理 / 复制提示词 / 原始链接」外还有一个 **AI 分析** 按钮（分析过之后变成**重新分析**）：
+
+- 点它调宿主 `analyze` 端点：宿主用 `ctx.reflect.get('llm')` 拿到当前 profile 的模型服务（**不需要写 `inject`**，取不到也不会让插件加载失败），把条目详情（含正文，最多 6000 字）交给模型，要求**只回一个 JSON**（`category` / `confidence` / `headline` / `reason` / `steps` / `questions`）；宿主再做白名单与长度归一化：类别白名单外归 `other`、置信度取整 0-100、`headline ≤ 80`、`reason ≤ 300`、`steps ≤ 5 条 × 160`、`questions ≤ 3 条 × 160`。
+- 结果显示在条目下方（虚线框 `.dzw-analysis`：类别标签 + 置信度 + 用的模型 + 一句话 + 依据 + 建议步骤 + 待确认），缓存在组件 state 里 —— 之后点「处理」/「复制提示词」会自动把这段一起发出去。
+- 模型路由：默认取 `llm.listProviders()` 的第一个 provider，并在它的 `listModels()` 里优先挑名字带 `flash / mini / small / lite / fast` 的模型；想钉死组合可以设 `DSH_ZENTAO_WORKBENCH_LLM=provider/model`（宿主半侧环境变量，改完要重启 DSH）。
+- 失败不写脏数据：模型没按 JSON 回（`llm-parse`）、超时 60s（`llm-aborted`）、上游报错（`llm-failed`）、profile 里没有可用路由（`llm-unavailable`），都只在面板错误条给出原因，不会把半截结果塞进提示词。
 
 ### 「完成」与「指派」
 
@@ -216,11 +230,12 @@ transport failure for /zentao-workbench/login: HTTP 405
 | endpoint | payload | 类型 | 说明 |
 | --- | --- | --- | --- |
 | `getConfig` | `{}` | 读 | 返回 `{ server, account, realname, role, hasToken, rememberToken }`（**永不返回 token**） |
-| `login` | `{ server, account, password?, token?, role, rememberToken }` | 读 | 换取并校验登录态 |
-| `setRole` | `{ role }` | 读 | 切换职位预设并落盘（**界面已不调用**，保留给脚本/以后恢复下拉框） |
+| `login` | `{ server, account, password?, token?, role?, rememberToken }` | 读 | 换取并校验登录态（`role` 已不再由界面传，缺省 `dev`） |
+| `setRole` | `{ role }` | 读 | 切换职位预设并落盘（**界面已不调用**；提示词现在不依赖职位，保留给脚本） |
 | `logout` | `{}` | 读 | 清空内存 token 与已保存 token |
 | `refresh` | `{ scope: 'tasks' \| 'all' }` | 读 | 返回 `{ fetchedAt, profile, tasks, bugs, stories, scan }` |
 | `fetchDetail` | `{ kind: 'task'\|'bug'\|'story', id }` | 读 | 返回单条详情（`sections` / `attachments` / `story` / `meta` / 历史） |
+| `analyze` | `{ kind: 'task'\|'bug'\|'story', id }` | 读（**会调用模型**） | 先 `fetchDetail` 再交给当前 profile 的模型做 AI 预判，返回 `{ category, categoryLabel, confidence, headline, reason, steps, questions, provider, model, routeSource, analyzedAt }` |
 | `startTask` | `{ id }` | **写** | 置为「开始」 |
 | `finishTask` | `{ id, hours?, comment? }` | **写** | 置为「完成」并登记本次耗时 |
 | `assignTask` | `{ id, account }` | **写** | 指派给别人 |
@@ -246,6 +261,19 @@ transport failure for /zentao-workbench/login: HTTP 405
 #### `fetchDetail`
 
 返回 `sections`（描述 / **研发需求描述** / **研发需求验收标准** / 步骤 / 重现步骤 分段正文，绝对地址已补全）、`attachments`（正文内嵌 `<img>`/`<a>` + `files[]` 抽出的附件，每项额外带 `proxyUrl`）、`story`（`{ id, title, status, statusLabel, link }`）、`meta`（`[{ label, value }]` 散字段，如所属执行 / 类型 / 工时 / 严重程度 / 解决方案，枚举已中文化）、`statusLabel` 与历史动作的 `actionLabel`（中文）、最近 10 条历史动作、原始链接。
+
+#### `analyze`
+
+先按 `fetchDetail` 取详情，再把「对象类型 / 编号 / 标题 / 字段 / 状态 / 指派给 / 所属研发需求 / 正文 / 附件」拼成一段输入（正文截到 6000 字）交给模型，要求**只回一个 JSON 对象**：
+
+```json
+{ "category": "bug|optimize|feature|other", "confidence": 0-100, "headline": "一句话", "reason": "依据", "steps": ["建议步骤"], "questions": ["待确认"] }
+```
+
+- 取模型走 `ctx.reflect.get('llm')`（**不写 `inject`**：cordis 的 `reflect.get` 不需要 inject，取不到只返回 `undefined`，不会让插件加载失败），再 `listProviders()` → `listModels()` 选路由：默认第一个 provider + 名字里优先 `flash / mini / small / lite / fast` 的模型；可用 `DSH_ZENTAO_WORKBENCH_LLM=provider/model` 钉死。
+- 归一化：类别白名单外归 `other`；`confidence` 取整并夹到 0-100，非法则 `null`；`headline ≤ 80`、`reason ≤ 300`、`steps ≤ 5 条 × 160`、`questions ≤ 3 条 × 160`。
+- 失败码：`llm-unavailable`（profile 没有可用路由）、`llm-parse`（模型没按要求回 JSON，报错里带原始输出前 300 字）、`llm-aborted`（60s 超时或被取消）、`llm-failed`（上游 `finish` 不是 `stop`，带原始 `kind` 与 failure）。**任何一种失败都不会返回半截结论**，界面只弹错误条。
+- 返回里带 `provider` / `model` / `routeSource`（`env` = 来自环境变量，`auto` = 自动挑的），界面会把它显示在预判块的右上角，方便判断「这句话是谁说的」。
 
 #### `startTask`（写）
 
@@ -295,9 +323,9 @@ transport failure for /zentao-workbench/login: HTTP 405
 
 | 参数 | 取值 |
 | --- | --- |
-| `action` | `mine`（默认，任务 + Bug + 需求快照）/ `tasks`（只要任务）/ `detail` |
-| `kind` | `action=detail` 时：`task` / `bug` / `story` |
-| `id` | `action=detail` 时：条目 ID |
+| `action` | `mine`（默认，任务 + Bug + 需求快照）/ `tasks`（只要任务）/ `detail` / `analyze`（AI 预判） |
+| `kind` | `action=detail` 或 `analyze` 时：`task` / `bug` / `story` |
+| `id` | `action=detail` 或 `analyze` 时：条目 ID |
 
 工具复用浮层那一份登录态，所以**必须先登录**；未登录时它会返回一句明确的提示而不是报错。
 
@@ -309,8 +337,8 @@ transport failure for /zentao-workbench/login: HTTP 405
 
 ```powershell
 cd E:\Eworkspace\dsh-zentao-workbench\.verify
-node host-smoke.mjs      # 宿主半侧：153/153
-node client-smoke.mjs    # 浏览器半侧：227/227
+node host-smoke.mjs      # 宿主半侧：179/179
+node client-smoke.mjs    # 浏览器半侧：252/252
 pwsh -File e2e-check.ps1 # 端到端：另起 19399 实例，复核三个写端点与 bundle 内容（跑完自动清理）
 ```
 
@@ -339,6 +367,7 @@ pwsh -File e2e-check.ps1 # 端到端：另起 19399 实例，复核三个写端�
 - **「完成」/「指派」/ 成员列表**：`assignedTo` 在真实实例上是**对象** `{ id, account, realname }`（旧代码 `asString(对象)` 恒为空串，会让「指派给我」的过滤形同虚设）而宿主要能解出账号与真名；`finishTask` 只打一次 `finish`、请求体带 `realStarted`（`YYYY-MM-DD`）+ `finishedDate` + 正确的 `currentConsumed`/`consumed` 累加、`6002` 这种「禅道收下但状态没变」必须 `changed: false` 且 note 含「没有改变任务状态」、已完成的任务不重复写、耗时留空按 0、负耗时 / 非数字 / 缺 id 一律 `bad-request` 信封；`assignTask` 的 body **只带 `assignedTo` 一个键**、`statusChanged` 如实反映「激活为进行中」、同人指派不重写、禅道回 200 但没改人时 `changed: false` + note 含「没有改变指派人」、缺 `account`/`id` → `bad-request`；`listUsers` 去重 + 中文排序（`['lisi','zhangsan']`）+ 带上 `self`，且请求参数是 `users?limit=100`。
 - **研发需求与散字段**：真机形态的任务 `#10002`（`desc` 为空但挂着需求）下，`storySpec` / `storyVerify` 分别进 `sections` 的「研发需求描述」「研发需求验收标准」、需求正文里的内嵌截图也进 `attachments` 且带 `proxyUrl`、`story` 给出 `{ id: '2001', title, statusLabel: '激活', link: '…/story-view-2001.html' }`（数字 `storyID` 不再被 `asString` 吞成空串）、`meta` 里「所属执行 / 模块 / 类型（`devel → 开发`）/ 预计·已耗·剩余工时 / 计划开始 / 延期（天）」逐条正确、`zentao` 工具文本含「研发需求：#2001」与「类型：开发」。
 - **用系统默认程序打开附件**（`openAttachment`）：`docx` 成功时 `opened=true`、返回的 `savedPath` 落在 `DSH_ZENTAO_WORKBENCH_OPEN_DIR` 下、`size` 与 `extension` 正确、**文件真的写到了本机**（冒烟用 `DSH_ZENTAO_WORKBENCH_OPENER=process.execPath` 以免真弹窗）、回源带 `Token` 头、文件名被清成 `<时间戳>-file-read-31005.docx`；`.exe` 请求返回 `forbidden` 信封且**根本没有发出下载请求**（白名单在 fetch 之前拦下）；异地 `evil.example.com` → `forbidden`；没有扩展名 / 缺 `url` → `bad-request`。
+- **AI 预判（`analyze`）**：mock 出 `ctx.reflect.get('llm')`（并断言宿主**没有**走 `ctx.llm` 直读这条需要 inject 的路），覆盖选中路由（第一个 provider + 命中 `flash` 的模型）、环境变量 `DSH_ZENTAO_WORKBENCH_LLM=provider/model` 优先、类别白名单外归 `other`、`confidence` 取整与非法值归 `null`、`headline` / `reason` / `steps` / `questions` 的长度与条数截断；失败面覆盖**读不到 `llm` 服务**（`llm-unavailable`）、**profile 里没有任何可用路由**（同码但文案不同）、模型回了带围栏/前后废话的输出仍能抠出 JSON、模型回非 JSON（`llm-parse`，报错带原始输出）、`finish.reason.kind !== 'stop'`（`llm-failed`，带原始 kind 与 failure）、超时/取消（`llm-aborted`）、缺 `kind`/`id` 或 `kind` 非法（`bad-request`）、未登录（明确提示而不是 `llm-unavailable`）；并断言整个分析链路**只打一次 `fetchDetail`**、失败时**不返回任何半截结论**。
 - 它用 `DSH_ZENTAO_WORKBENCH_CONFIG` 指向临时目录，不会污染你的真实配置。
 
 ### `client-smoke.mjs` 覆盖什么
@@ -357,6 +386,8 @@ pwsh -File e2e-check.ps1 # 端到端：另起 19399 实例，复核三个写端�
 - **点「处理」后调 `startTask`**：带正确 id、成功后提示中文状态并刷新列表、禅道没改状态时提示「状态未变」、Bug / 需求不动手。
 - **「完成」/「指派」两张卡片**：条目上只有任务有这两个按钮、已完成任务的「完成」按钮禁用、点开写入 `finishFor` / `assignFor` state、耗时与备注的输入回写、耗时非法时不发请求且卡片不关、提交后 toast 带中文状态与累计耗时并刷新列表、`changed: false` 时提示「状态未变 / 未变」而不是谎报成功、成员列表按真名或账号过滤 + 空态、点成员行只发 `{ id, account }`、`Esc` 关闭顺序 预览 → 完成 → 指派 → 详情、面板收起时卡片仍能弹。
 - **`uiWorkspace` 不可用时的降级路径**：走 `sessions.create` 且不释放引用。
+- **新版提示词**（用户 m04648 的改造）：抬头先要求判类别、四套套路齐全、**真的带上了正文**（先 `fetchDetail` 再拼）与**附件清单**、带确定性字段线索段、带条目标题与工具指引，且不再出现旧的「开发工程师」职位话术。
+- **「AI 分析」按钮与预判块**：按钮 title 说明结论会带进提示词；点它调 `analyze` 并把结果写进 state（给「AI 预判：Bug 修复 / 置信度 86」这种提示）；列表行下方渲染 `.dzw-analysis`（中文类别 + 置信度 + 模型名 + 一句话 + 依据 + 建议步骤 + 待确认），按钮变「重新分析」；带预判点「处理」时提示词里追加 `## AI 预判…` 段（类别 / 一句话 / 步骤 / 待确认），且**预判不替代正文**（正文与附件仍在）；`analyze` 失败时只把宿主错误显示到面板错误条、**不写脏预判**；mock 里刻意不带 `sessions.open` / `workspaces.connectWorkspace`，顺带验降级路径。
 - **发送目标可切换（工作区有多个时）**：工作区 > 1 才渲染 `.dzw-select`、默认停在「跟随当前工作区」且文案带该后缀、下拉里列出「跟随当前工作区 + 两个工作区」共三项、`onChange` 写回最后一个 state、选中 ws-9 后文案与下拉都指向「另一个项目」并把会话建在 ws-9（**不碰** ws-1）、提示词的工作区段落换成 ws-9 的标题与路径、选中的工作区消失后订阅回调把选择重置为空串、只有一个工作区时不渲染下拉但文案点明「当前只有 1 个工作区」、直接把不存在的 ID 交给 `handlePrompt` 会明确报「已不在」、CSS 断言目标行 `display: flex` + `.dzw-target-text` 省略号 + 下拉 `max-width`。
 - **详情卡片里的研发需求与 `meta`**：一条可点的「研发需求：#2001 …（激活）」链接（`href` 指 `story-view-2001.html`、`target=_blank`）、`来源 Bug：#3001` 那行仍在、`meta` 逐条渲染成「所属执行：示例执行 / 类型：开发 / 严重程度：3 轻微 / 预计工时：1」，以及**旧宿主没给 `story` / `meta` 时不多渲染任何行**（向后兼容）。
 
@@ -433,11 +464,12 @@ dsh --profile web --dump-config | Select-String -Pattern 'zentao' -Context 1,1
 - **「用默认程序打开」会在本机落文件**：宿主把附件下载到 `%TEMP%\dsh-zentao-workbench\` 再交系统打开（不会自动清理），扩展名走白名单、`.exe`/`.bat`/`.lnk` 在下载前就被拒绝。请只对你自己认可的附件点这个按钮。
 - 「处理」建出的会话**是否自动切到前台**取决于 `uiWorkspace` 服务是否可用（DSH Web 常规情况下可用，启动时会打印一行 `[zentao-workbench] uiWorkspace=ready|unavailable`）。不可用时退化为 `sessions.create({ workspaceId })`，会话仍会带着提示词任务跑起来，但需要你在左侧列表里手动点开。
 - **自有路由没有 DSH 的 admission 门**：`GET /` 的登录 Cookie 校验只保护首页（`authorizeIndex`），挂在同一 webServer 上的 `POST /zentao-workbench/*` 不受它保护。本插件只能做同源校验（`Origin`/`Sec-Fetch-Site`），**挡不住本机其它进程直接 POST**。因为它监听 `127.0.0.1` 且只暴露「读禅道 + 登录」，风险面可控；若你不接受这个前提，就别在有不可信本地进程的机器上开 DSH。
+- **「AI 分析」要用掉当前实例的模型**：它读的是本进程的 `ctx.reflect.get('llm')`，profile 里没有可用路由时返回 `llm-unavailable` 并提示先配模型；每次分析是一次真实模型调用（输出上限 900 tokens、超时 60 秒），结论由模型给出、**仅供参考**，发出去的提示词里也标注了这一点。
 - **浮层能否出现必须在界面上确认**：组装树与两侧离线冒烟都已通过，但正在运行的 `desktop` profile 由桌面应用独占管理，改完必须重启 DSH 才会加载新插件。
 
 ---
 
-## 附录 A：开发中发现并修掉的 18 个真实缺陷 <a id="sec-defects"></a>
+## 附录 A：开发中发现并修掉的 19 个真实缺陷 <a id="sec-defects"></a>
 
 记录下来，避免以后再踩：
 
@@ -459,6 +491,7 @@ dsh --profile web --dump-config | Select-String -Pattern 'zentao' -Context 1,1
 16. **视频附件「有地址却播不了」** —— 禅道对 mp4 直链回的是 `content-type: application/octet-stream`（还**没有 `content-length`、没有 `accept-ranges`，并且完全忽略 `Range`**：实测无 `Range` / `bytes=0-1023` / `bytes=1000-` 三种请求都回 200 + 全量 2,046,090 字节，见任务 `#10001` 的两个 `.mp4`）。后果有两个：把地址丢给 `<video>` 时浏览器因为类型不对直接不播；就算类型对了，进度条也拖不动 —— 想跳到哪里都得把整段重新下完。现在宿主在代理分支上做两件事：① 上游类型是 `application/octet-stream`（或缺省）时按扩展名改回 `video/mp4` / `audio/mpeg` 等；② 用 `parseByteRange()` 解析 `Range` 请求头，拿内存里那份完整字节就地切片，返回 `206 + content-range + accept-ranges: bytes`，越界回 `416 + content-range: bytes */N`、非法头按整份 200 返回。于是播放器只在需要时才拿分片，拖动不用重下。
 17. **「有研发需求描述，弹窗里却是空的」** —— 禅道把任务的研发需求**内联在任务详情里**：`storyID` / `storyTitle` / `storyStatus` / `storySpec`（需求正文，可能整段 HTML 加内嵌截图）/ `storyVerify`。旧代码的正文白名单只有 `desc` / `steps` / `bugSteps`，`storySpec` 压根没取，于是任务页上明明有「研发需求」那一大块，卡片里只有一行「（详情里没有描述 / 步骤正文）」。顺带还有一个更隐蔽的：需求 id 在 `storyID` 里是**数字**，而取值用的 `asString()` 只认字符串，`asString(2001)` 恒为 `''` —— 即使把字段名加对了，也只能拿到空标题、拼不出链接。现在用 `scalarString()` 兼容数字，`storySpec` / `storyVerify` 进 `sections`，`story` 给出可点的「研发需求：#id 标题（状态）」，其余散字段（所属执行 / 类型 / 优先级 / 三种工时 / 计划与实际开始·完成 / 关闭原因 / 延期 / 严重程度 / 解决方案 / 影响版本…）由 `DETAIL_META_FIELDS` + `detailMeta()` 统一收集成 `meta` 逐条显示，枚举值再走 `TYPE_LABEL` / `SEVERITY_LABEL` / `RESOLUTION_LABEL` / `STAGE_LABEL` 中文化。实测依据：任务 `#10002`（`desc` 为空、`storyID: 2001`、`storySpec` 里有内嵌截图）与 `#10003`（`storySpec` 是大表格）—— 这两条在只读探针里都能看到内容，旧版本界面上却什么都没有。
 18. **PDF 预览变成「下载」** —— 附件代理一开始只回 `content-type` 与 `private` 缓存头，没有 `content-disposition`。图片和视频无感（`<img>`/`<video>` 只看类型），但把 PDF 放进 `<iframe>` 时浏览器会按「未知处置方式」处理：有的直接触发下载、有的在 iframe 里留一片空白。现在代理分支对 200 与 206 都显式回 `content-disposition: inline`，PDF 因此在工作台内就能翻页预览。顺带把「用默认程序打开」做成**先查扩展名白名单再下载**：下载到本机再交系统执行，等于把「附件」变成「可执行文件」，`.exe` / `.bat` / `.lnk` 这类必须在发出请求之前就拒绝（返回 `forbidden`，冒烟里有一条断言专门验证「被拒的 exe 根本没被下载」）。
+19. **提示词「看起来不对劲」：正文取不到、话术锁死成开发一套、附件压根没进提示词** —— 用户原话是「提示词似乎不对劲 如何优化？原来存在职位 根据职位的。现在没有职位？」。三处原因叠在一起：① 提示词里的 `if (item.description)` **永远不成立**，因为列表行（`normalizeItem`）只带标题 / 状态 / 指派人，正文字段只在详情里 —— 所以提示词里只有一行标题加一个链接，模型既看不到重现步骤也看不到截图；② 职位下拉被取消后 `FIXED_ROLE = 'dev'` 把所有条目都按「开发」讲，Bug、优化、需求套的是同一套话术，而 dev 文案里还写死了「按项目《禅道接口.md》的收尾闭环流程」（换个工作区就指向不存在的文件）；③ 附件（含正文内嵌截图）从来没有以任何形式进过提示词。现在：点「处理 / 复制提示词」会**先调一次 `fetchDetail`**，把 `description` 与附件清单拼进 `### 描述 / 重现步骤 / 研发需求` 与 `### 附件（N 个）`；抬头（`PROMPT_INTRO`）改成「第一步先判 Bug 修复 / 体验或性能优化 / 新增需求 / 其它，第二步再按对应套路干活」；删掉 `ROLES` 四套职位预设与写死的文档名；另加确定性的**字段线索段**（标题关键词 + `kind` + 严重程度 / 优先级 / 状态，只给线索不锁结论）；并新增**「AI 分析」按钮**（宿主 `analyze` 端点用 `ctx.reflect.get('llm')` 调当前 profile 的模型，要求只回 JSON），结论以 `## AI 预判（工作台按当前模型给出，仅供参考，请自行复核）` 段随提示词一起发出去。
 
 ---
 

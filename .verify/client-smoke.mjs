@@ -239,6 +239,24 @@ const openAttachmentReply = {
   size: 64,
   extension: 'docx',
 };
+// analyze（AI 预判：Bug / 优化 / 需求）的回答可切换，用来验证成功与失败两条路径。
+let analyzeFails = false;
+const analyzeReply = {
+  kind: 'task',
+  id: '42',
+  title: '补充单元测试',
+  category: 'bug',
+  categoryLabel: 'Bug 修复',
+  confidence: 86,
+  headline: '筛选条件为空时没兜底，列表直接崩了',
+  reason: '详情里的重现步骤写明「点击筛选即白屏」，属功能与预期不符。',
+  steps: ['复现并抓到报错栈', '在列表渲染前补空值兜底', '补一条回归用例'],
+  questions: ['只有「筛选」入口会触发吗？'],
+  provider: 'deepseek',
+  model: 'deepseek-flash',
+  routeSource: 'auto',
+  analyzedAt: '2026-10-08T00:00:00.000Z',
+};
 const rpc = {
   async fetch(url, init) {
     const endpoint = decodeURIComponent(String(url).slice('/zentao-workbench/'.length));
@@ -263,6 +281,9 @@ const rpc = {
               { label: '重现步骤', text: '点击筛选即白屏\n[附件] http://zentao.example.com:11180/zentao/file-read-16547.png' },
               { label: '描述', text: '偶发，刷新后恢复' },
             ],
+            // 真实宿主 normalizeDetail 会把 sections 合成一段纯文本 description（lib/index.js:593）——
+            // 提示词里的正文用的就是它。
+            description: '点击筛选即白屏\n[附件] http://zentao.example.com:11180/zentao/file-read-16547.png\n\n偶发，刷新后恢复',
             attachments: [
               {
                 name: 'file-read-16547.png',
@@ -310,6 +331,11 @@ const rpc = {
         };
       }
       if (endpoint === 'startTask') return { ok: true, value: startTaskReply };
+      if (endpoint === 'analyze') {
+        return analyzeFails
+          ? { ok: false, error: { code: 'llm-failed', message: '模型调用未正常结束（error）：模型服务暂时不可用' } }
+          : { ok: true, value: analyzeReply };
+      }
       if (endpoint === 'finishTask') return { ok: true, value: finishTaskReply };
       if (endpoint === 'assignTask') return { ok: true, value: assignTaskReply };
       if (endpoint === 'listUsers') return { ok: true, value: usersReply };
@@ -474,6 +500,13 @@ ok(
   /\.dzw-preview-foot\s*\{[^}]*display:\s*flex/.test(cssText) && /\.dzw-preview-hint\s*\{/.test(cssText),
 );
 ok('缩略图与「放大」都是手型光标', /\.dzw-thumb-link\s*\{[^}]*cursor:\s*zoom-in/.test(cssText) && /\.dzw-zoom\s*\{[^}]*cursor:\s*zoom-in/.test(cssText));
+ok(
+  'AI 预判块样式存在（虚线框标出「这只是参考」+ 类别加粗）',
+  /\.dzw-analysis\s*\{[^}]*border:\s*1px dashed/.test(cssText) &&
+    /\.dzw-analysis\s*\{[^}]*border-radius:\s*var\(--dsw-radius-xs/.test(cssText) &&
+    /\.dzw-analysis-tag\s*\{[^}]*font-weight:\s*600/.test(cssText),
+  cssText.match(/\.dzw-analysis\s*\{[^}]*\}/)?.[0],
+);
 ok(
   '视频附件样式存在（卡片里高度 190px 的播放器 + 大屏预览同样按视口缩放）',
   /\.dzw-video\s*\{[^}]*max-height:\s*190px/.test(cssText) &&
@@ -673,7 +706,31 @@ ok('retain 了新会话（source=zentao-workbench）', sessionApi.some((entry) =
 ok('打开后释放了 retain 引用', sessionApi.some((entry) => entry.op === 'release' && entry.sessionId === 'session-ui'), JSON.stringify(sessionApi));
 ok('没有依赖不存在的 sessions.open / workspaces.connectWorkspace', typeof ctx.sessions.open === 'undefined' && typeof ctx.workspaces.connectWorkspace === 'undefined');
 ok('向 conversation.send 发送了提示词', sentPrompts.length === 1, sentPrompts.length);
-ok('提示词含 dev 角色设定', sentPrompts[0]?.includes('开发工程师'), sentPrompts[0]?.slice(0, 80));
+ok(
+  '提示词抬头先要求判类别（Bug 修复 / 体验或性能优化 / 新增需求 / 其它）',
+  sentPrompts[0]?.includes('第一步：先判类别') && sentPrompts[0].includes('Bug 修复 / 体验或性能优化 / 新增需求 / 其它'),
+  sentPrompts[0]?.slice(0, 200),
+);
+ok(
+  '提示词按类别给了四套套路（不再只有开发一套话术）',
+  ['Bug 修复：复现路径', '体验或性能优化：现状与基线', '新增需求：目标与验收标准', '其它：先澄清目标'].every((line) => sentPrompts[0]?.includes(line)),
+  sentPrompts[0]?.slice(0, 400),
+);
+ok(
+  '提示词带上了正文（fetchDetail 的描述 / 重现步骤）',
+  sentPrompts[0]?.includes('### 描述 / 重现步骤 / 研发需求') && sentPrompts[0].includes('点击筛选即白屏'),
+  sentPrompts[0]?.slice(0, 600),
+);
+ok(
+  '提示词列出了附件清单',
+  sentPrompts[0]?.includes('### 附件（4 个）') && sentPrompts[0].includes('需求说明.docx'),
+  sentPrompts[0]?.slice(0, 700),
+);
+ok(
+  '提示词带字段线索段（工作台先给一个确定性猜测，判断权仍在模型）',
+  sentPrompts[0]?.includes('## 线索') && sentPrompts[0].includes('工作台的初步猜测：其它'),
+  sentPrompts[0]?.slice(0, 500),
+);
 // 点的是渲染后的第一条（ID 最大 = 42 补充单元测试）。
 ok(
   '提示词含条目标题与详情指引',
@@ -682,6 +739,132 @@ ok(
 );
 ok('提示词带禅道原始链接', sentPrompts[0]?.includes('task-view-42.html'), sentPrompts[0]?.slice(-300));
 ok('提示词指明当前工作区（标题 + 绝对路径）', sentPrompts[0]?.includes('当前工作区') && sentPrompts[0]?.includes('E:\\Eworkspace\\dsh-zentao-workbench'), sentPrompts[0]?.slice(-400));
+
+console.log('\n== 5b. 交互：AI 分析（先判 Bug / 优化 / 需求，结论再带进提示词） ==');
+// 这一段刻意自带两个小工具（后面的 P() / byExactText 定义在更下面，这里够不着）。
+const exactButtons = (t, needle) => clickablesOf(t).filter((node) => textOf(node).trim() === needle);
+const T = (over) => [
+  over.open ?? true, undefined, loggedInConfig, undefined, undefined, undefined, undefined,
+  over.tab ?? 'task', loggedInData,
+  over.detail === undefined ? null : over.detail,
+  null, null, null, null, '',
+  over.analyses ?? undefined,
+];
+tree = renderPass(T({}));
+await flush();
+const analyzeButtons = exactButtons(tree, 'AI 分析');
+ok('每条任务都有「AI 分析」按钮（3 条 → 3 个）', analyzeButtons.length === 3, analyzeButtons.length);
+ok(
+  '「AI 分析」按钮的 title 说明结论会带进提示词',
+  String(analyzeButtons[0]?.props?.title ?? '').includes('带进提示词'),
+  JSON.stringify(analyzeButtons[0]?.props?.title),
+);
+const analyzeBefore = calls.filter((entry) => entry.endpoint === 'analyze').length;
+try {
+  analyzeButtons[0].props.onClick();
+  await flush();
+  caught = undefined;
+} catch (error) {
+  caught = error;
+}
+ok('点「AI 分析」不抛异常', caught === undefined, caught?.stack ?? caught);
+ok('也没有未处理的异步失败', unhandled.length === 0, unhandled.map((reason) => reason?.stack ?? String(reason)).join('\n'));
+const analyzeCalls = calls.filter((entry) => entry.endpoint === 'analyze');
+ok('调用宿主 analyze 端点', analyzeCalls.length === analyzeBefore + 1, JSON.stringify(analyzeCalls.map((entry) => entry.payload)));
+ok(
+  'analyze 载荷带 kind 与 id（点的是 #42）',
+  analyzeCalls.at(-1)?.payload?.kind === 'task' && analyzeCalls.at(-1)?.payload?.id === '42',
+  JSON.stringify(analyzeCalls.at(-1)?.payload),
+);
+const analysesSetter = hookState.setters.find((entry) => entry.index === 15);
+ok(
+  '预判结果写进第 16 个 state（analyses，下标 15，键 task-42）',
+  analysesSetter?.value?.['task-42']?.category === 'bug' && analysesSetter.value['task-42'].confidence === 86,
+  JSON.stringify(analysesSetter?.value),
+);
+ok(
+  '分析成功后给提示（类别 + 置信度）',
+  String(hookState.setters.find((entry) => entry.index === 6)?.value ?? '').includes('AI 预判：Bug 修复') &&
+    String(hookState.setters.find((entry) => entry.index === 6)?.value ?? '').includes('置信度 86'),
+  JSON.stringify(hookState.setters.find((entry) => entry.index === 6)?.value),
+);
+
+// 带预判重新渲染：列表行下方出预判块，按钮变「重新分析」。
+tree = renderPass(T({ analyses: { 'task-42': analyzeReply } }));
+await flush();
+const analysisBlock = findByClass(tree, 'dzw-analysis');
+ok('列表行下方渲染 AI 预判块', analysisBlock !== undefined);
+ok(
+  '预判块显示中文类别 + 置信度 + 模型',
+  analysisBlock !== undefined &&
+    textOf(analysisBlock).includes('Bug 修复') &&
+    textOf(analysisBlock).includes('置信度 86') &&
+    textOf(analysisBlock).includes('deepseek/deepseek-flash'),
+  analysisBlock === undefined ? '(没有预判块)' : textOf(analysisBlock),
+);
+ok('预判块给出依据与一句话结论', textOf(analysisBlock).includes('筛选条件为空时没兜底') && textOf(analysisBlock).includes('依据：'), textOf(analysisBlock));
+ok(
+  '预判块列出建议步骤与待确认项',
+  textOf(findByClass(tree, 'dzw-analysis-steps')).includes('补一条回归用例') && textOf(analysisBlock).includes('待确认：只有「筛选」入口会触发吗？'),
+  textOf(analysisBlock),
+);
+ok('有预判的那条按钮变成「重新分析」（只有 #42 分析过 → 1 个）', exactButtons(tree, '重新分析').length === 1, exactButtons(tree, '重新分析').length);
+
+// 带预判再点「处理」：提示词要同时含正文、附件、线索与 AI 预判。
+sentPrompts.length = 0;
+hookState.setters = [];
+const handleWithAnalysis = findByText(tree, '处理');
+try {
+  handleWithAnalysis.props.onClick();
+  await flush(12);
+  caught = undefined;
+} catch (error) {
+  caught = error;
+}
+ok('带预判点「处理」不抛异常', caught === undefined, caught?.stack ?? caught);
+ok('提示词含 AI 预判段（类别 + 一句话 + 步骤 + 待确认）', (() => {
+  const text = sentPrompts[0] ?? '';
+  return (
+    text.includes('## AI 预判（工作台按当前模型给出') &&
+    text.includes('类别：Bug 修复（置信度 86）') &&
+    text.includes('一句话：筛选条件为空时没兜底') &&
+    text.includes('1. 复现并抓到报错栈') &&
+    text.includes('待确认：只有「筛选」入口会触发吗？')
+  );
+})(), sentPrompts[0]?.slice(0, 900));
+ok(
+  '预判不替代正文：提示词仍带详情正文与附件',
+  sentPrompts[0]?.includes('点击筛选即白屏') && sentPrompts[0].includes('### 附件（4 个）'),
+  sentPrompts[0]?.slice(0, 900),
+);
+
+// analyze 失败：只提示，不写入预判。
+analyzeFails = true;
+hookState.setters = [];
+const reanalyzeButtons = exactButtons(tree, '重新分析');
+try {
+  reanalyzeButtons[0].props.onClick();
+  await flush();
+  caught = undefined;
+} catch (error) {
+  caught = error;
+}
+analyzeFails = false;
+ok('analyze 失败时不抛异常', caught === undefined, caught?.stack ?? caught);
+ok(
+  'analyze 失败时把宿主错误显示到面板错误条（run() 的错误走 error state）',
+  // run() 先 setError('') 再 setError(message)，同一个 state 会 push 两个 setter，取最后一个。
+  String(
+    hookState.setters.filter((entry) => entry.index === 5).at(-1)?.value ?? '',
+  ).includes('模型调用未正常结束'),
+  JSON.stringify(hookState.setters.filter((entry) => entry.index === 5).map((entry) => entry.value)),
+);
+ok(
+  'analyze 失败时不写脏预判（analyses 没被改）',
+  !hookState.setters.some((entry) => entry.index === 15),
+  JSON.stringify(hookState.setters.filter((entry) => entry.index === 15).map((entry) => entry.value)),
+);
+ok('失败后仍可重试（「重新分析」按钮还在）', exactButtons(tree, '重新分析').length === 1, exactButtons(tree, '重新分析').length);
 
 console.log('\n== 6. 交互：切到 Bug 页 + 详情弹窗 ==');
 try {
@@ -1229,7 +1412,7 @@ ok('Bug 上点「处理」不抛异常', caught === undefined, caught?.stack ?? 
 ok('Bug / 需求不会被置为开始（只对任务动手）', calls.filter((entry) => entry.endpoint === 'startTask').length === bugStartBefore, JSON.stringify(calls.filter((entry) => entry.endpoint === 'startTask').map((entry) => entry.payload)));
 
 console.log('\n== 11. 完成（填耗时）/ 指派（PUT tasks/{id}） ==');
-// useState 顺序：open, target, config, form, busy, error, toast, tab, data, detail, preview, finishFor, assignFor, users, pick
+// useState 顺序：open, target, config, form, busy, error, toast, tab, data, detail, preview, finishFor, assignFor, users, pick, analyses
 const P = (over) => [
   over.open ?? true,
   undefined,
@@ -1246,6 +1429,7 @@ const P = (over) => [
   over.assignFor === undefined ? null : over.assignFor,
   over.users === undefined ? null : over.users,
   over.pick ?? '',
+  over.analyses ?? undefined,
 ];
 uiAvailable = true;
 finishTaskReply = { changed: true, previousStatus: 'wait', status: 'done', statusLabel: '已完成', consumed: 5.5, finishedDate: '2026-10-08', note: '' };
