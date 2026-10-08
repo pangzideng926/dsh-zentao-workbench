@@ -1,0 +1,9 @@
+# 统一用 LF 存储，避免 Windows 上 autocrlf 把整套文件改写成 CRLF
+* text=auto eol=lf
+
+# 二进制
+*.png binary
+*.jpg binary
+*.mp4 binary
+*.docx binary
+*.pdf binary

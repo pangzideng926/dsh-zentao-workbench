@@ -1,0 +1,52 @@
+{
+  "name": "dsh-zentao-workbench",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DSH Web 禅道悬浮工作台：登录自己的禅道实例、拉取指派给本人的任务/Bug/需求、一键按职位预设新建对话处理，并注册 agent 可调用的 zentao 工具。",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "zentao",
+    "禅道",
+    "cordis"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "_comment": [
+    "type: module —— 本包是 ESM。",
+    "main: lib/index.js —— 宿主半侧入口（Cordis 插件：name/inject/apply），零第三方运行时依赖，只用 node: 内建模块与全局 fetch。",
+    "exports['./client'] —— 浏览器半侧入口；DSH 模块系统按它提供 /plugins/dsh-zentao-workbench/client.js。",
+    "dsh.bundle.patch —— 声明本包是一个 bundle，安装后 cordis.patch.yml 会进入 profile 的层栈。",
+    "dsh.client.platform=web —— 声明本包有浏览器半侧，并给出工厂到达顺序依赖。",
+    "不声明 peerDependencies —— 本地 link 安装时 pnpm 不会为被链接包装依赖，宿主半侧因此刻意不 import 任何 @deepseek-ai/* 包。"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-connection"
+      ]
+    }
+  }
+}

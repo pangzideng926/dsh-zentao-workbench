@@ -1,0 +1,16 @@
+# 依赖
+node_modules/
+.pnpm-store/
+
+# 日志与临时产物
+*.log
+*.tmp
+.verify/*.log
+.verify/out/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

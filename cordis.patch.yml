@@ -1,0 +1,18 @@
+# dsh-zentao-workbench 的 bundle patch —— 把本插件挂进 DSH 配置树。
+#
+# 结构说明：
+#   - insert：往配置树里添加一条插件行（entry）。
+#   - id：本行标识，patch 覆盖时按它定位（自定义插件建议前缀化，避免与他人撞名）。
+#   - name：模块名，解析到本包的 main（lib/index.js，宿主半侧）。
+#
+# 因为 package.json 里声明了 dsh.client（platform=web），DSH 的模块系统同时会把本包
+# 识别为「浏览器插件」，向页面提供 /plugins/dsh-zentao-workbench/client.js —— 也就是
+# exports["./client"] 指向的 lib/client.js。一行 entry 同时激活两侧。
+#
+# 注意：这里**不要**写 row 级 inject。宿主半侧自己用 ctx.inject(['webServer'], …) 注册
+# RPC 路由，实测 row/模块级 inject 都改不了 `ctx.connection.rpc` 内部的 owner 解析，
+# 加进来只会让本行的依赖面变大而不解决问题。
+
+- insert:
+    - id: zentao-workbench
+      name: 'dsh-zentao-workbench'
