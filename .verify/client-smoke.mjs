@@ -2232,7 +2232,14 @@ const inputNodes = (t) => {
 };
 tree = renderPass(T({ authExpired: true }));
 await flush();
-ok('登录表单有「记住密码」选项', textOf(tree).includes('记住密码（加密后写入本机配置'), textOf(tree).match(/记住密码[^）]*）|记住密码[^\n]{0,40}/)?.[0]);
+ok('登录表单有「记住密码」选项', textOf(tree).includes('记住密码') && textOf(tree).includes('加密保存，Token 过期自动重登'), textOf(tree).match(/记住密码[^\n]{0,40}/)?.[0]);
+ok(
+  'CSS：勾选项不再被 60px 的 label 宽度压成一字一行',
+  /\.dzw-row\s*>\s*label\.dzw-check\s*\{[^}]*width:\s*auto/.test(cssText) &&
+    /\.dzw-check\s*\{[^}]*align-items:\s*flex-start/.test(cssText) &&
+    /\.dzw-check\s*>\s*input\s*\{[^}]*flex:\s*none/.test(cssText),
+  (cssText.match(/\.dzw-row\s*>\s*label\.dzw-check\s*\{[^}]*\}/) ?? [''])[0],
+);
 const loginCheckboxes = inputNodes(tree);
 ok('默认勾选「记住密码」（第 1 个复选框）并保留「记住 Token」', loginCheckboxes.length >= 2 && loginCheckboxes[0].props.checked === true, JSON.stringify(loginCheckboxes.map((n) => n.props.checked)));
 
