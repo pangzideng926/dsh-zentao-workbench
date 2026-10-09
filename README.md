@@ -25,7 +25,7 @@
 | [本地验证](#sec-verify) | 离线冒烟、端到端复核、改完代码怎么确认生效 |
 | [关于禅道 REST API v1](#sec-api) | 实测过的接口事实与坑 |
 | [已知限制](#sec-limits) | 边界与风险 |
-| [附录 A](#sec-defects) | 开发中发现并修掉的 20 个真实缺陷 |
+| [附录 A](#sec-defects) | 开发中发现并修掉的 21 个真实缺陷 |
 | [附录 B](#sec-probe) | 研发需求字段的只读实测（2026-10） |
 
 ---
@@ -375,6 +375,10 @@ pwsh -File e2e-check.ps1 # 端到端：另起 19399 实例，复核三个写端�
 
 用 React/DOM 替身按 `useState` 顺序注入初始 state，mock 出**真实服务面**（`sessions.list/create/retain/scope`、`workspaces.list`，刻意**没有** `sessions.open` 与 `workspaces.connectWorkspace`），覆盖：
 
+- **四项交互安全修复**：Bug/需求首次切页按需加载；详情失败会明确提示并停止处理/复制，不发送缺正文的提示词；连续点击「处理」不会并发创建重复会话；AI 缓存按服务器、账号、类别与列表内容隔离，登录变更或刷新会让**在途**分析作废（已完成的预判保留，避免每次刷新重花模型调用），发送前还会核对详情内容指纹，正文变化时不沿用旧结论。
+- **取数性能**：切 Bug 页只聚合 Bug、切需求页只聚合需求（不再互相拖累）；「刷新」按页签取数并带 `force` 绕过宿主缓存；按 `scopes` 合并响应（按类别刷新不会清空另一个页签已加载的列表）；未加载过的页签计数显示「…」而不是 0；底部显示「更新于 HH:MM:SS」。
+- **渐进扫描**：宿主先回首包 + `jobs`，客户端轮询 `scanProgress` 增量写回；显示「正在扫描 N/M 个产品」；扫描期间保留旧列表（不闪空）；扫完停止轮询；换账号（epoch 变化）后停止回写。
+- **本地快照**：取数成功写 localStorage、重启后先用快照渲染再刷新、退出登录删除快照；快照带版本号，格式不符时忽略。
 - **加载契约**：模块 id、`inject`、apply 注册的 slot（`shell.overlay`）、样式注入只做一次。
 - **样式与 slot 注册**：`--dsw-*` 令牌白名单；「tab 不再被压缩」；悬浮卡片样式；**面板与卡片共用 `--dzw-frame-height` 固定高度、列表 `flex: 1` 内滚动**。
 - **首屏未登录**：登录表单渲染，且**不再有职位选择**。
@@ -447,7 +451,15 @@ dsh --profile web --dump-config | Select-String -Pattern 'zentao' -Context 1,1
 
 - **登录**：`POST tokens` → `{ token }`，之后每个请求带 `Token` 头。
 - **任务列表**：`GET tasks?page=N` —— 该参数在禅道上表现为「每页条数」，**不传只返回 1 条**。
-- **Bug / 需求没有「按账号的全局列表」**：只能 `GET products` 拿到产品后逐个 `GET products/{id}/bugs|stories` 再按 `assignedTo` 过滤。因此浮层默认登录后只自动加载「任务」（快），切换到 Bug/需求页签时会按需聚合加载；最多扫描 30 个产品（并发 4），单个产品失败会被跳过而不是整体失败。
+- **Bug / 需求没有「按账号的全局列表」**：只能 `GET products` 拿到产品后逐个 `GET products/{id}/bugs|stories` 再按 `assignedTo` 过滤 —— **只保留 `assignedTo` 恰好等于本人账号的条目**：禅道里大量需求处于「未指派」（`assignedTo` 为空串，详情里也是空），空指派**不算**「指派给我」。实测某产品下 63 条需求只有 3 条指派给本人，其余 60 条都是未指派。因此浮层默认登录后只自动加载「任务」（快），切换到 Bug/需求页签时按需聚合加载；最多扫描 30 个产品，单个产品失败会被跳过而不是整体失败。
+- **服务端过滤/裁剪参数实测全部无效（2026-10，带 Token 只读探针）**：`bugs?assignedTo=账号` 与 `bugs?product=1&assignedTo=账号` 的 `total` 与不传时**完全一样**（服务端忽略 `assignedTo`）；`fields=id` 的响应体与全字段**一样大**（忽略 `fields`）；`product=1,2` / `product[]=1&product[]=2` 的 `total` 等于只传 `product=1`（不支持多产品）；`GET bugs|stories` 缺 `product` 是 `400 Need product id.`，`my/bugs`、`user/bugs` 是 `404`。结论：**按人过滤只能本地做，逐产品扫描是硬约束**。
+- **并发没用，少打请求才有用（同一轮实测）**：18 个请求在并发 4 / 9 / 12 下分别耗时 4.18 / 4.36 / 4.13 s，接近串行（18 × ~230 ms）——禅道对同一会话的请求实际上是串行处理的（PHP session 锁 / 进程池小）。单个请求固定开销 ~230 ms（`limit=1` 的 1.4 KB 响应 287 ms，`limit=100` 的 140 KB 响应 451 ms，即延迟为主、体积其次）。
+- **因此取数策略是「少打 + 复用 + 边扫边给」**：`scope=tasks` 只打 1 个请求（~0.2 s）；`scope=bugs` / `scope=stories` 各约 10 个请求（~2.3 s）；`scope=all` 约 19 个请求（~4.5 s，Bug 与需求两轮并行且共用同一份产品列表）。
+  - **渐进扫描**：缓存未命中时宿主**不等扫完**，立刻返回任务 + `jobs:[{kind,id,done,total}]`，浏览器半侧每 400 ms 轮询 `scanProgress` 把结果写回列表 —— 第一条 Bug/需求大约 0.4 s 就出现（而不是 2.3 s），界面上显示「正在扫描 3/9 个产品…」。扫描期间**保留**上一份列表，不会先闪空；扫完若确实为空才清空。`zentao` 工具需要完整结果，走的是 `wait=true` 的同步路径，不会拿到半截数据。
+  - **两级 TTL 缓存**：产品列表 5 分钟、按类别的「指派给我」聚合 2 分钟 —— 缓存期内重复切页签/刷新是**零请求**；点「刷新」带 `force` 绕过。登录/退出会清空缓存（换账号不串味）。
+  - **本地快照（stale-while-revalidate）**：每次成功取数后按 `服务器|账号` 写一份快照到浏览器 localStorage；重启 DSH / 刷新页面后**先用快照渲染**（秒开），再后台刷新覆盖。退出登录会删掉快照。快照只存条目元数据（标题/状态/指派人/ID），与面板上看到的一致。
+  - **计时日志**：宿主每次刷新打印一行 `[zentao-workbench] refresh scope=bugs 2310ms 请求=10 缓存=未命中 后台扫描=1`，扫描另有 `scan kind=bug 完成 …`，用来按真实数据继续优化而不是拍脑袋。
+  - 顺带把 `tasks` 的 `total` 读出来：超过 `LIST_LIMIT`（50）时界面提示「共 N 条任务，仅显示前 50 条」，不再静默少显示。
 - **详情**：`GET tasks|bugs|stories/{id}`（详情响应是**单数键** `{ task: {…} }`）。
 - **开始任务**：`POST tasks/{id}/start`（body `{ realStarted, consumed?, left? }`）—— **恒返回 200 + 空响应体**，必须回读 `GET tasks/{id}` 的 `status` 才知道有没有生效。
 - **完成任务**：`POST tasks/{id}/finish`（body 必填 `realStarted` + `finishedDate`，缺任一个都是 HTTP 400（`『实际开始』不能为空。` / `『实际完成』不能为空。`），本次耗时用 `currentConsumed`、累计用 `consumed`）—— 同样**恒返回 200 + 空响应体**，一样要回读。
@@ -470,7 +482,7 @@ dsh --profile web --dump-config | Select-String -Pattern 'zentao' -Context 1,1
 
 ---
 
-## 附录 A：开发中发现并修掉的 20 个真实缺陷 <a id="sec-defects"></a>
+## 附录 A：开发中发现并修掉的 21 个真实缺陷 <a id="sec-defects"></a>
 
 记录下来，避免以后再踩：
 
@@ -495,6 +507,9 @@ dsh --profile web --dump-config | Select-String -Pattern 'zentao' -Context 1,1
 19. **提示词「看起来不对劲」：正文取不到、话术锁死成开发一套、附件压根没进提示词** —— 用户原话是「提示词似乎不对劲 如何优化？原来存在职位 根据职位的。现在没有职位？」。三处原因叠在一起：① 提示词里的 `if (item.description)` **永远不成立**，因为列表行（`normalizeItem`）只带标题 / 状态 / 指派人，正文字段只在详情里 —— 所以提示词里只有一行标题加一个链接，模型既看不到重现步骤也看不到截图；② 职位下拉被取消后 `FIXED_ROLE = 'dev'` 把所有条目都按「开发」讲，Bug、优化、需求套的是同一套话术，而 dev 文案里还写死了「按项目《禅道接口.md》的收尾闭环流程」（换个工作区就指向不存在的文件）；③ 附件（含正文内嵌截图）从来没有以任何形式进过提示词。现在：点「处理 / 复制提示词」会**先调一次 `fetchDetail`**，把 `description` 与附件清单拼进 `### 描述 / 重现步骤 / 研发需求` 与 `### 附件（N 个）`；抬头（`PROMPT_INTRO`）改成「第一步先判 Bug 修复 / 体验或性能优化 / 新增需求 / 其它，第二步再按对应套路干活」；删掉 `ROLES` 四套职位预设与写死的文档名；另加确定性的**字段线索段**（标题关键词 + `kind` + 严重程度 / 优先级 / 状态，只给线索不锁结论）；并新增**「AI 分析」按钮**（宿主 `analyze` 端点用 `ctx.reflect.get('llm')` 调当前 profile 的模型，要求只回 JSON），结论以 `## AI 预判（工作台按当前模型给出，仅供参考，请自行复核）` 段随提示词一起发出去。
 
 20. **「AI 分析」用的不是 DSH 自己的默认模型** —— 用户问「AI 分析的调用默认 AI 不应该跟随 DSH 吗？」。旧实现是「`listProviders()` 的第一个 provider + 名字里带 `flash` 的模型（没有就取第一个）」，实测在 web profile 上挑中的是 `shuai/gpt-6-astra`，而 DSH 自己的默认模型（`@deepseek-ai/dsh-agent-default-model` 的 `agentDefaultModel` 服务，配置键 `agent-default-model`）在 desktop profile 里是 `zai-coding-cn/glm-5.3`、web profile 里是 `deepseek-official/deepseek-flash` —— 也就是说分析用的模型和界面右上角显示的模型**可以毫无关系**。现在改成三级优先级：`DSH_ZENTAO_WORKBENCH_LLM`（显式钉死）＞ `ctx.reflect.get('agentDefaultModel').currentSelection()`（跟随 DSH 默认模型，`routeSource: 'dsh'`）＞ 自动挑便宜路由（`routeSource: 'auto'`，并回带 `routeNote` 说明为什么没跟随）。只有默认模型的 provider 在当前实例**没注册**时才放弃跟随（那时硬发只会得到 `INVALID_CATALOG`）；`listProviders()` 本身抛错时反而照发默认模型，不武断回退。取证方式：`npx @electron/asar extract-file` 从 `app.asar` 里取出 `dsh-agent-default-model` / `dsh-agent/lib/types/model-selection.js` / `dsh-client-ui-model-selection`，并直接读两个 profile 的 `cordis.patch.yml` 拿到真实默认值。改完在临时 `--profile web --port 19399` 实例上端到端实测过一次：`POST /zentao-workbench/analyze {"kind":"task","id":"10002"}` 返回 `provider: "deepseek-official"`、`model: "deepseek-flash"`、**`routeSource: "dsh"`**（web profile 的 `agent-default-model` 正是这一对），并且同一轮暴露出 900 tokens 不够 —— 模型以 `finish: max-tokens` 收尾、一个 JSON 都没吐出来，于是额度提到 4000 并改成「先解析、能解析就用」。
+
+21. **需求页混进大量「不是指派给我」的条目** —— 用户报障原话：「需求 不是指派给我的为什么显示？」。过滤条件是 `if (item.assignedTo !== '' && item.assignedTo !== profile.account) continue;` —— 本意是「空指派就别管」，实际效果却是**把「未指派」当成「指派给我」放行**。用真实实例取证：某产品下 63 条需求里只有 3 条 `assignedTo` 等于本人，其余 60 条 `assignedTo` 是空串（连 `GET stories/{id}` 详情里也是空，属于真的没人认领），于是这 60 条全部堆进了需求页签。现在改成严格相等 `if (item.assignedTo !== profile.account) continue;`，并在宿主的「未指派」样例上加了固定回归（未指派 + 他人名下的 Bug/需求都必须被滤掉）。
+
 
 ---
 

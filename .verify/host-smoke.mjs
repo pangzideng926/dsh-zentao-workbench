@@ -69,6 +69,8 @@ const BUGS = {
         assignedToRealName: '张三',
         product: 1,
       },
+      // 未指派（assignedTo 为空）不能算「指派给我」——实测禅道里大量需求都是这种状态。
+      { id: 103, title: '未指派的 Bug', status: 'active', assignedTo: '', product: 1 },
     ],
   },
   2: {
@@ -85,7 +87,14 @@ const BUGS = {
   },
 };
 const STORIES = {
-  1: { stories: [{ id: 201, title: '支持批量导入', status: 'reviewing', assignedTo: 'zhangsan', product: 1 }] },
+  1: {
+    stories: [
+      { id: 201, title: '支持批量导入', status: 'reviewing', assignedTo: 'zhangsan', product: 1 },
+      // 60 条未指派需求混进「指派给我」是线上真实报障，这里固定成回归样例。
+      { id: 202, title: '未指派的需求', status: 'reviewing', assignedTo: '', product: 1 },
+      { id: 203, title: '别人名下的需求', status: 'reviewing', assignedTo: 'wangwu', product: 1 },
+    ],
+  },
   2: { stories: [] },
 };
 
@@ -118,6 +127,9 @@ const TASK_OWNER = { 6001: 'zhangsan', 6002: 'zhangsan', 6003: 'zhangsan' };
 
 /** 被 mock 的请求记录，用于断言 URL/方法/头。 */
 const seen = [];
+
+/** 扫描类请求的模拟延迟（ms）：见 fetch mock 里 products/{id}/bugs|stories 分支。 */
+const scanDelayMs = 15;
 
 globalThis.fetch = async (url, init = {}) => {
   const parsed = new URL(url);
@@ -156,9 +168,17 @@ globalThis.fetch = async (url, init = {}) => {
   if (path === 'tasks') return respond(200, TASKS);
   if (path === 'products') return respond(200, PRODUCTS);
   const bug = /^products\/(\d)\/bugs/.exec(path);
-  if (bug) return respond(200, BUGS[bug[1]]);
+  // 真实实例每个请求 ~230 ms 且被串行化；这里给扫描请求加一点延迟，
+  // 才测得出「渐进返回」这条路径（否则 mock 瞬间跑完，首包就已经是全量了）。
+  if (bug) {
+    await new Promise((resolve) => setTimeout(resolve, scanDelayMs));
+    return respond(200, BUGS[bug[1]]);
+  }
   const story = /^products\/(\d)\/stories/.exec(path);
-  if (story) return respond(200, STORIES[story[1]]);
+  if (story) {
+    await new Promise((resolve) => setTimeout(resolve, scanDelayMs));
+    return respond(200, STORIES[story[1]]);
+  }
   // ---- 「处理」→ 任务置为开始 ----------------------------------------------
   const startAction = /^tasks\/(\d+)\/start$/.exec(path);
   if (startAction !== undefined && startAction !== null && init.method === 'POST') {
@@ -630,11 +650,53 @@ ok('未勾选记住 Token 时不落盘', loginOk.value?.rememberToken === false)
 
 // ---------------------------------------------------------------------------
 console.log('\n== 5. RPC：refresh（任务 + Bug + 需求聚合） ==');
+
+/** 轮询把所有后台扫描跑完；返回按类别归并后的结果（模拟浏览器的增量轮询）。 */
+async function settleScans(snapshot) {
+  const out = { bugs: [...(snapshot.value?.bugs ?? [])], stories: [...(snapshot.value?.stories ?? [])], polls: 0, finalProgress: undefined };
+  for (const job of snapshot.value?.jobs ?? []) {
+    for (let i = 0; i < 400; i += 1) {
+      const progress = await call('scanProgress', { jobId: job.id });
+      out.polls += 1;
+      if (progress.ok !== true) break;
+      if (job.kind === 'bugs') out.bugs = progress.value?.bugs ?? [];
+      else out.stories = progress.value?.stories ?? [];
+      if (progress.value?.finished === true) {
+        out.finalProgress = progress.value;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  }
+  return out;
+}
+
 const snapshot = await call('refresh', { scope: 'all' });
 ok('refresh 成功', snapshot.ok === true, JSON.stringify(snapshot).slice(0, 300));
 ok('任务 2 条', snapshot.value?.tasks?.length === 2, snapshot.value?.tasks?.length);
-ok('Bug 只保留指派给我的（过滤掉 wangwu）', snapshot.value?.bugs?.length === 1 && snapshot.value.bugs[0].id === '101', JSON.stringify(snapshot.value?.bugs));
-ok('需求 1 条', snapshot.value?.stories?.length === 1, snapshot.value?.stories?.length);
+ok('回带 taskTotal（用于提示「仅显示前 N 条」）', snapshot.value?.taskTotal === 2, JSON.stringify(snapshot.value?.taskTotal));
+ok(
+  'Bug/需求走渐进扫描：立刻返回 2 个后台任务而不是干等',
+  Array.isArray(snapshot.value?.jobs) && snapshot.value.jobs.length === 2 && snapshot.value.jobs.every((job) => typeof job.id === 'string' && job.total === 2),
+  JSON.stringify(snapshot.value?.jobs),
+);
+ok(
+  '渐进首包不含尚未扫到的条目（不是假装扫完了）',
+  (snapshot.value?.bugs ?? []).length === 0 && (snapshot.value?.stories ?? []).length === 0,
+  JSON.stringify({ bugs: snapshot.value?.bugs?.length, stories: snapshot.value?.stories?.length }),
+);
+const settled = await settleScans(snapshot);
+ok('轮询到扫描完成', settled.finalProgress?.finished === true, JSON.stringify(settled.finalProgress));
+ok(
+  '扫描完成后 Bug 只保留指派给我的（滤掉 wangwu 与未指派）',
+  JSON.stringify(settled.bugs.map((item) => String(item.id))) === JSON.stringify(['101']),
+  JSON.stringify(settled.bugs),
+);
+ok(
+  '扫描完成后需求只保留指派给我的（滤掉未指派与 wangwu）',
+  JSON.stringify(settled.stories.map((item) => String(item.id))) === JSON.stringify(['201']),
+  JSON.stringify(settled.stories),
+);
 // mock 后端按 11 → 12 的升序返回，宿主必须倒序成 12 → 11。
 ok(
   '任务按 ID 倒序（12 → 11）',
@@ -647,6 +709,62 @@ ok('后续请求都带了 Token 头', seen.filter((entry) => entry.path !== 'tok
 
 const onlyTasks = await call('refresh', { scope: 'tasks' });
 ok('scope=tasks 不拉 Bug/需求', onlyTasks.value?.bugs?.length === 0 && onlyTasks.value?.stories?.length === 0);
+ok('scope=tasks 回带 scopes 只有 tasks', JSON.stringify(onlyTasks.value?.scopes) === JSON.stringify(['tasks']), JSON.stringify(onlyTasks.value?.scopes));
+ok('scope=tasks 不启动后台扫描', (onlyTasks.value?.jobs ?? []).length === 0, JSON.stringify(onlyTasks.value?.jobs));
+
+// ---- 按类别取数 + 短时缓存（性能改造） --------------------------------------
+const beforeBugs = seen.filter((entry) => /\/bugs\?/.test(entry.path)).length;
+const onlyBugs = await call('refresh', { scope: 'bugs', force: true });
+const afterBugs = seen.filter((entry) => /\/bugs\?/.test(entry.path)).length;
+const bugsSettled = await settleScans(onlyBugs);
+ok('scope=bugs 只扫 Bug（不扫需求）', afterBugs > beforeBugs && bugsSettled.bugs.length === 1 && bugsSettled.stories.length === 0, JSON.stringify({ bugs: bugsSettled.bugs.length, stories: bugsSettled.stories.length }));
+ok('scope=bugs 回带 scopes=[tasks,bugs]', JSON.stringify(onlyBugs.value?.scopes) === JSON.stringify(['tasks', 'bugs']), JSON.stringify(onlyBugs.value?.scopes));
+const beforeStories = seen.filter((entry) => /\/stories\?/.test(entry.path)).length;
+const onlyStories = await call('refresh', { scope: 'stories', force: true });
+const afterStories = seen.filter((entry) => /\/stories\?/.test(entry.path)).length;
+const storiesSettled = await settleScans(onlyStories);
+ok('scope=stories 只扫需求（不扫 Bug）', afterStories > beforeStories && storiesSettled.stories.length === 1 && storiesSettled.bugs.length === 0, JSON.stringify({ bugs: storiesSettled.bugs.length, stories: storiesSettled.stories.length }));
+ok('强制扫描只跑一次产品列表里的该类别（2 个产品 → 2 次请求）', afterBugs - beforeBugs === 2 && afterStories - beforeStories === 2, JSON.stringify({ bug请求: afterBugs - beforeBugs, 需求请求: afterStories - beforeStories }));
+
+const scanCallsBefore = seen.filter((entry) => /\/bugs\?|\/stories\?/.test(entry.path)).length;
+const productsBefore = seen.filter((entry) => entry.path.startsWith('products?limit=')).length;
+const cachedRun = await call('refresh', { scope: 'all' });
+const scanCallsAfter = seen.filter((entry) => /\/bugs\?|\/stories\?/.test(entry.path)).length;
+const productsAfter = seen.filter((entry) => entry.path.startsWith('products?limit=')).length;
+ok(
+  '2 分钟内的重复聚合直接命中缓存（0 个产品扫描请求、无后台任务）',
+  scanCallsAfter - scanCallsBefore === 0 && productsAfter - productsBefore === 0 && cachedRun.value?.cached === true && (cachedRun.value?.jobs ?? []).length === 0,
+  JSON.stringify({ 扫描请求: scanCallsAfter - scanCallsBefore, 产品请求: productsAfter - productsBefore, cached: cachedRun.value?.cached, jobs: cachedRun.value?.jobs?.length }),
+);
+ok('缓存命中仍返回完整结果', cachedRun.value?.bugs?.length === 1 && cachedRun.value?.stories?.length === 1 && cachedRun.value?.tasks?.length === 2, JSON.stringify({ bugs: cachedRun.value?.bugs?.length, stories: cachedRun.value?.stories?.length, tasks: cachedRun.value?.tasks?.length }));
+
+const forcedProductsBefore = seen.filter((entry) => entry.path.startsWith('products?limit=')).length;
+const forcedScanBefore = seen.filter((entry) => /\/bugs\?|\/stories\?/.test(entry.path)).length;
+const forcedRun = await call('refresh', { scope: 'all', force: true });
+const forcedProductsAfter = seen.filter((entry) => entry.path.startsWith('products?limit=')).length;
+const forcedScanAfter = seen.filter((entry) => /\/bugs\?|\/stories\?/.test(entry.path)).length;
+ok(
+  'force=true 绕过缓存并只取一次产品列表（Bug/需求共用）',
+  forcedProductsAfter - forcedProductsBefore === 1 && forcedScanAfter - forcedScanBefore === 4 && forcedRun.value?.cached === false,
+  JSON.stringify({ 产品请求: forcedProductsAfter - forcedProductsBefore, 扫描请求: forcedScanAfter - forcedScanBefore, cached: forcedRun.value?.cached }),
+);
+const forcedSettled = await settleScans(forcedRun);
+ok(
+  '强制聚合（渐进轮询完成后）结果不变：任务 2 / Bug 1 / 需求 1',
+  forcedRun.value?.tasks?.length === 2 && forcedSettled.bugs.length === 1 && forcedSettled.stories.length === 1,
+  JSON.stringify({ tasks: forcedRun.value?.tasks?.length, bugs: forcedSettled.bugs.length, stories: forcedSettled.stories.length }),
+);
+
+// 登录后缓存必须作废（换账号不能吃上一个账号的聚合结果）。
+const logoutForCache = await call('logout', {});
+ok('logout 成功', logoutForCache.ok === true, JSON.stringify(logoutForCache));
+const relogin = await call('login', { server: 'http://zentao.example.com:11180/zentao', account: 'zhangsan', password: 'secret' });
+ok('重新登录成功', relogin.ok === true, JSON.stringify(relogin).slice(0, 200));
+const cacheScanBefore = seen.filter((entry) => /\/bugs\?|\/stories\?/.test(entry.path)).length;
+const afterLoginRun = await call('refresh', { scope: 'all' });
+const cacheScanAfter = seen.filter((entry) => /\/bugs\?|\/stories\?/.test(entry.path)).length;
+ok('重新登录后缓存已作废（必须重新扫描）', cacheScanAfter - cacheScanBefore === 4 && afterLoginRun.value?.cached === false, JSON.stringify({ 扫描请求: cacheScanAfter - cacheScanBefore, cached: afterLoginRun.value?.cached }));
+
 ok(
   '状态给出中文标签（wait→未开始）',
   snapshot.value?.tasks?.some((task) => String(task.id) === '12' && task.statusLabel === '未开始'),
@@ -948,15 +1066,16 @@ console.log('\n== 10. 「完成」/「指派」/ 成员列表 ==');
 // 第 9 节末尾已登录。
 
 // 对象形状的 assignedTo 必须被解成账号 + 真名（早期 asString(对象) 会收成空串）。
+// 注意用 settled（渐进扫描完成后的结果）：首包可能还没扫到 Bug。
 ok(
   '对象形状的 assignedTo 解出账号与真名',
-  snapshot.value?.bugs?.[0]?.assignedTo === 'zhangsan' && snapshot.value?.bugs?.[0]?.assignedToName === '张三',
-  JSON.stringify(snapshot.value?.bugs?.[0]),
+  settled.bugs[0]?.assignedTo === 'zhangsan' && settled.bugs[0]?.assignedToName === '张三',
+  JSON.stringify(settled.bugs[0]),
 );
 ok(
   '「指派给我」过滤对对象形状同样生效（wangwu 被滤掉）',
-  snapshot.value?.bugs?.length === 1 && snapshot.value?.bugs?.[0]?.id === '101',
-  JSON.stringify(snapshot.value?.bugs),
+  settled.bugs.length === 1 && settled.bugs[0]?.id === '101',
+  JSON.stringify(settled.bugs),
 );
 ok('工具文本用真名（@张三）而不是裸账号', toolTasks.content.includes('@张三'), toolTasks.content.slice(0, 200));
 
@@ -1233,6 +1352,7 @@ ok(
   JSON.stringify({ kind: analysis.value?.kind, id: analysis.value?.id, title: analysis.value?.title }),
 );
 ok('analyze 回带 analyzedAt（ISO）', typeof analysis.value?.analyzedAt === 'string' && analysis.value.analyzedAt.includes('T'), String(analysis.value?.analyzedAt));
+ok('分析返回详情内容指纹', /^[a-f0-9]{64}$/.test(analysis.value?.contentFingerprint ?? ''));
 ok('analyze 记录路由来源 auto', analysis.value?.routeSource === 'auto', String(analysis.value?.routeSource));
 ok(
   '自动挑便宜路由：优先 flash 模型',

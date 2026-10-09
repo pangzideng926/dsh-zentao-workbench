@@ -138,10 +138,17 @@ Object.defineProperty(globalThis, 'navigator', {
 // ---------------------------------------------------------------------------
 
 let loaded;
+const localStorageData = new Map();
 globalThis.window = {
   __ModuleLoader__: { load(spec) { loaded = spec; } },
   setTimeout: (fn, ms) => globalThis.setTimeout(fn, ms),
   clearTimeout: (id) => globalThis.clearTimeout(id),
+  // 快照持久化用：内存版 localStorage（不碰真实浏览器存储）。
+  localStorage: {
+    getItem: (key) => (localStorageData.has(key) ? localStorageData.get(key) : null),
+    setItem: (key, value) => { localStorageData.set(key, String(value)); },
+    removeItem: (key) => { localStorageData.delete(key); },
+  },
 };
 
 // 组件里的异步点击处理是「fire and forget」的，失败会变成未处理的 rejection；
@@ -241,6 +248,12 @@ const openAttachmentReply = {
 };
 // analyze（AI 预判：Bug / 优化 / 需求）的回答可切换，用来验证成功与失败两条路径。
 let analyzeFails = false;
+let detailFails = false;
+let analyzeGate;
+let detailFingerprint = '测试正文指纹';
+/** 渐进扫描模拟开关：开启后 refresh 只回首包 + jobId，由 scanProgress 轮询补齐。 */
+let scanJobMode = false;
+const scanPolls = [];
 const analyzeReply = {
   kind: 'task',
   id: '42',
@@ -256,21 +269,68 @@ const analyzeReply = {
   model: 'deepseek-flash',
   routeSource: 'dsh',
   analyzedAt: '2026-10-08T00:00:00.000Z',
+  contentFingerprint: '测试正文指纹',
 };
 const rpc = {
   async fetch(url, init) {
     const endpoint = decodeURIComponent(String(url).slice('/zentao-workbench/'.length));
     const payload = JSON.parse(init?.body ?? '{}');
     calls.push({ endpoint, url, method: init?.method, headers: init?.headers, credentials: init?.credentials, payload });
+    if (endpoint === 'analyze' && analyzeGate !== undefined) await analyzeGate;
     const body = (() => {
       if (endpoint === 'getConfig') return { ok: true, value: loggedInConfig };
-      if (endpoint === 'refresh') return { ok: true, value: loggedInData };
+      if (endpoint === 'refresh') {
+        // 真实宿主会按 scope 只回对应类别，并回带 scopes 让客户端合并（而不是整体替换）。
+        const scope = payload.scope ?? 'all';
+        const scopes =
+          scope === 'all'
+            ? ['tasks', 'bugs', 'stories']
+            : scope === 'bugs'
+              ? ['tasks', 'bugs']
+              : scope === 'stories'
+                ? ['tasks', 'stories']
+                : ['tasks'];
+        // scanJobMode：模拟「宿主没等扫完就返回」的渐进路径（首包空 + jobId）。
+        const jobs = scanJobMode && scope !== 'tasks'
+          ? [{ kind: scope === 'stories' ? 'stories' : 'bugs', id: 'job-1', done: 0, total: 2, finished: false }]
+          : [];
+        return {
+          ok: true,
+          value: {
+            ...loggedInData,
+            scopes,
+            cached: false,
+            jobs,
+            bugs: scanJobMode && scope !== 'stories' ? [] : loggedInData.bugs,
+            stories: scanJobMode && scope === 'stories' ? [] : loggedInData.stories,
+          },
+        };
+      }
+      if (endpoint === 'scanProgress') {
+        scanPolls.push(payload.jobId);
+        // 第一次还没扫完，第二次返回最终结果 —— 覆盖「边扫边显示」与「扫完停止轮询」。
+        const finished = scanPolls.filter((id) => id === payload.jobId).length >= 2;
+        return {
+          ok: true,
+          value: {
+            missing: false,
+            finished,
+            done: finished ? 2 : 1,
+            total: 2,
+            error: '',
+            bugs: finished ? loggedInData.bugs : [],
+            stories: finished ? loggedInData.stories : [],
+          },
+        };
+      }
       if (endpoint === 'fetchDetail') {
+        if (detailFails) return { ok: false, error: { code: 'detail-failed', message: '测试详情失败' } };
         // 真实宿主形态：sections（描述 / 步骤）+ attachments（正文内嵌图片补全成绝对地址）。
         return {
           ok: true,
           value: {
             kind: payload.kind ?? 'task',
+            contentFingerprint: detailFingerprint,
             id: payload.id,
             title: '列表页崩溃',
             status: 'active',
@@ -750,10 +810,11 @@ console.log('\n== 5b. 交互：AI 分析（先判 Bug / 优化 / 需求，结论
 const exactButtons = (t, needle) => clickablesOf(t).filter((node) => textOf(node).trim() === needle);
 const T = (over) => [
   over.open ?? true, undefined, loggedInConfig, undefined, undefined, undefined, undefined,
-  over.tab ?? 'task', loggedInData,
+  over.tab ?? 'task', over.data ?? loggedInData,
   over.detail === undefined ? null : over.detail,
   null, null, null, null, '',
   over.analyses ?? undefined,
+  over.progress ?? undefined,
 ];
 tree = renderPass(T({}));
 await flush();
@@ -781,10 +842,13 @@ ok(
   analyzeCalls.at(-1)?.payload?.kind === 'task' && analyzeCalls.at(-1)?.payload?.id === '42',
   JSON.stringify(analyzeCalls.at(-1)?.payload),
 );
-const analysesSetter = hookState.setters.find((entry) => entry.index === 15);
+const analysesSetter = hookState.setters.findLast((entry) => entry.index === 15);
 ok(
-  '预判结果写进第 16 个 state（analyses，下标 15，键 task-42）',
-  analysesSetter?.value?.['task-42']?.category === 'bug' && analysesSetter.value['task-42'].confidence === 86,
+  '预判结果写进第 16 个 state（analyses，下标 15，键含账号与条目版本）',
+  Object.entries(analysesSetter?.value ?? {}).some(([key, value]) => {
+    const [server, account, kind, item] = JSON.parse(key);
+    return server === loggedInConfig.server && account === loggedInConfig.account && kind === 'task' && item.id === '42' && value?.category === 'bug' && value.confidence === 86;
+  }),
   JSON.stringify(analysesSetter?.value),
 );
 ok(
@@ -794,8 +858,11 @@ ok(
   JSON.stringify(hookState.setters.find((entry) => entry.index === 6)?.value),
 );
 
-// 带预判重新渲染：列表行下方出预判块，按钮变「重新分析」。
-tree = renderPass(T({ analyses: { 'task-42': analyzeReply } }));
+const cacheKey42 = JSON.stringify([loggedInConfig.server, loggedInConfig.account, 'task', loggedInData.tasks.find((item) => item.id === '42')]);
+const analysisFor42 = (extra = {}) => ({
+  [cacheKey42]: { ...analyzeReply, ...extra },
+});
+tree = renderPass(T({ analyses: analysisFor42() }));
 await flush();
 const analysisBlock = findByClass(tree, 'dzw-analysis');
 ok('列表行下方渲染 AI 预判块', analysisBlock !== undefined);
@@ -819,14 +886,14 @@ ok(
   textOf(analysisBlock).includes('deepseek/deepseek-flash（DSH 默认模型）'),
   textOf(analysisBlock),
 );
-tree = renderPass(T({ analyses: { 'task-42': { ...analyzeReply, truncated: true } } }));
+tree = renderPass(T({ analyses: analysisFor42({ truncated: true }) }));
 await flush();
 ok(
   '输出被截断时预判块如实标注',
   textOf(findByClass(tree, 'dzw-analysis')).includes('输出可能被截断'),
   textOf(findByClass(tree, 'dzw-analysis')),
 );
-tree = renderPass(T({ analyses: { 'task-42': analyzeReply } }));
+tree = renderPass(T({ analyses: analysisFor42() }));
 await flush();
 
 // 带预判再点「处理」：提示词要同时含正文、附件、线索与 AI 预判。
@@ -896,7 +963,7 @@ const routeNoteReply = {
   routeSource: 'auto',
   routeNote: 'DSH 默认模型 zai-coding-cn/glm-5.3 在当前实例里没有注册，已改为自动挑选一条可用路由。',
 };
-tree = renderPass(T({ analyses: { 'task-42': routeNoteReply } }));
+tree = renderPass(T({ analyses: analysisFor42(routeNoteReply) }));
 await flush();
 const routeNoteBlock = findByClass(tree, 'dzw-analysis');
 ok(
@@ -1903,6 +1970,214 @@ ok(
     /\.dzw-target\s+\.dzw-select\s*\{[^}]*max-width/.test(cssText),
   (cssText.match(/\.dzw-target\s*\{[^}]*\}/) ?? [''])[0],
 );
+
+console.log('\n== 13. 加载、详情失败、防重入与缓存隔离 ==');
+tree = renderPass(T({}));
+await flush();
+hookState.setters = [];
+sentPrompts.length = 0;
+detailFails = true;
+findByText(tree, '处理').props.onClick();
+await flush();
+ok('详情失败不创建会话或发送残缺提示词', sentPrompts.length === 0);
+ok('详情失败显示明确提示', hookState.setters.some((entry) => entry.index === 6 && String(entry.value).includes('未发送不完整')));
+findByText(tree, '复制提示词').props.onClick();
+await flush();
+ok('复制路径详情失败不产生未处理拒绝', unhandled.length === 0);
+detailFails = false;
+const sameHandle = findByText(tree, '处理');
+sameHandle.props.onClick();
+sameHandle.props.onClick();
+await flush(12);
+ok('同一轮连续处理只发送一次', sentPrompts.length === 1);
+
+const isolated = T({ analyses: analysisFor42() });
+isolated[2] = { ...loggedInConfig, account: '测试另一账号' };
+tree = renderPass(isolated);
+await flush();
+ok('其他账号不显示同编号旧分析', findByClass(tree, 'dzw-analysis') === undefined);
+isolated[2] = { ...loggedInConfig, server: 'https://another.example.invalid' };
+tree = renderPass(isolated);
+await flush();
+ok('其他服务器不显示同编号旧分析', findByClass(tree, 'dzw-analysis') === undefined);
+const changedContent = T({ analyses: analysisFor42() });
+changedContent[8] = { ...loggedInData, tasks: loggedInData.tasks.map((item) => item.id === '42' ? { ...item, title: '测试新标题' } : item) };
+tree = renderPass(changedContent);
+await flush();
+ok('列表内容变化不显示旧分析', findByClass(tree, 'dzw-analysis') === undefined);
+
+tree = renderPass(T({ analyses: analysisFor42() }));
+await flush();
+detailFingerprint = '测试新正文指纹';
+sentPrompts.length = 0;
+findByText(tree, '处理').props.onClick();
+await flush(12);
+ok('详情正文变化不把旧分析带进提示词', sentPrompts.length === 1 && !sentPrompts[0].includes('## AI 预判'));
+detailFingerprint = '测试正文指纹';
+
+tree = renderPass(T({}));
+await flush();
+hookState.setters = [];
+let releaseAnalysis;
+analyzeGate = new Promise((resolve) => { releaseAnalysis = resolve; });
+const beforePending = calls.filter((entry) => entry.endpoint === 'analyze').length;
+const pendingAnalyzeButton = findByText(tree, 'AI 分析');
+pendingAnalyzeButton.props.onClick();
+pendingAnalyzeButton.props.onClick();
+await flush();
+ok('同条目并发分析只调用一次宿主', calls.filter((entry) => entry.endpoint === 'analyze').length === beforePending + 1);
+findByText(tree, '刷新').props.onClick();
+await flush();
+hookState.setters = [];
+releaseAnalysis();
+await flush(12);
+analyzeGate = undefined;
+ok('刷新后旧分析完成不会回写缓存', !hookState.setters.some((entry) => entry.index === 15 && Object.keys(entry.value).length > 0));
+
+tree = renderPass(T({ analyses: analysisFor42() }));
+await flush();
+hookState.setters = [];
+findByText(tree, '刷新').props.onClick();
+await flush(12);
+ok('刷新不会清空已完成预判（避免每次刷新都重花模型调用）', !hookState.setters.some((entry) => entry.index === 15));
+ok('刷新后预判块仍在列表里', findByClass(tree, 'dzw-analysis') !== undefined);
+
+calls.length = 0;
+tree = renderPass(T({ tab: 'bug' }));
+await flush();
+ok('首次切 Bug 页只聚合 Bug（不再连需求一起扫）', calls.some((entry) => entry.endpoint === 'refresh' && entry.payload.scope === 'bugs'), JSON.stringify(calls.map((entry) => entry.payload)));
+calls.length = 0;
+tree = renderPass(T({ tab: 'story' }));
+await flush();
+ok('首次切需求页只聚合需求', calls.some((entry) => entry.endpoint === 'refresh' && entry.payload.scope === 'stories'), JSON.stringify(calls.map((entry) => entry.payload)));
+calls.length = 0;
+tree = renderPass(T({ tab: 'task' }));
+await flush();
+ok('任务页仅加载任务且启动不重复拉取', calls.filter((entry) => entry.endpoint === 'refresh').length === 1 && calls.find((entry) => entry.endpoint === 'refresh').payload.scope === 'tasks');
+
+// 性能：任务页点「刷新」不应顺带扫全部产品（旧实现固定打 scope=all，实测 4.5s → 0.2s）。
+calls.length = 0;
+hookState.setters = [];
+findByText(tree, '刷新').props.onClick();
+await flush(12);
+ok('任务页「刷新」只拉任务（不再顺带扫产品）', calls.find((entry) => entry.endpoint === 'refresh')?.payload.scope === 'tasks', JSON.stringify(calls.map((entry) => entry.payload)));
+ok('「刷新」带 force=true（明确要求重拉，不吃宿主缓存）', calls.find((entry) => entry.endpoint === 'refresh')?.payload.force === true, JSON.stringify(calls.map((entry) => entry.payload)));
+ok('任务页刷新按钮带「单个请求」的说明', String(findByText(tree, '刷新').props.title ?? '').includes('单个请求'));
+const mergedSetter = hookState.setters.findLast((entry) => entry.index === 8);
+ok(
+  '任务页刷新是合并更新，不清空已加载的 Bug/需求',
+  mergedSetter?.value?.bugs?.length === loggedInData.bugs.length &&
+    mergedSetter.value.stories.length === loggedInData.stories.length &&
+    mergedSetter.value.tasks.length > 0 &&
+    mergedSetter.value.fetchedAt !== '',
+  JSON.stringify({ bugs: mergedSetter?.value?.bugs?.length, stories: mergedSetter?.value?.stories?.length, tasks: mergedSetter?.value?.tasks?.length }),
+);
+
+// Bug 页点「刷新」：已加载过也要强制重拉（force），且只重扫 Bug。
+calls.length = 0;
+tree = renderPass(T({ tab: 'bug' }));
+await flush();
+calls.length = 0;
+hookState.setters = [];
+findByText(tree, '刷新').props.onClick();
+await flush(12);
+const bugRefresh = calls.find((entry) => entry.endpoint === 'refresh');
+ok('Bug 页「刷新」只重扫 Bug 且强制绕过缓存', bugRefresh?.payload.scope === 'bugs' && bugRefresh.payload.force === true, JSON.stringify(calls.map((entry) => entry.payload)));
+const bugMerge = hookState.setters.findLast((entry) => entry.index === 8);
+ok(
+  'Bug 页刷新不清空需求列表',
+  bugMerge?.value?.stories?.length === loggedInData.stories.length && bugMerge.value.bugs.length > 0,
+  JSON.stringify({ bugs: bugMerge?.value?.bugs?.length, stories: bugMerge?.value?.stories?.length }),
+);
+
+// 未加载过的类别显示「…」而不是 0（避免误以为「一条都没有」）。
+// 还没有数据、也没加载过 → 显示「…」；从快照恢复了旧数据 → 直接显示条数。
+const emptyOthers = T({ tab: 'task' });
+emptyOthers[8] = { ...loggedInData, bugs: [], stories: [] };
+tree = renderPass(emptyOthers);
+await flush();
+const beforeLoadText = textOf(tree);
+ok('尚未加载过的类别显示省略号而不是 0', beforeLoadText.includes('Bug（…）') && beforeLoadText.includes('需求（…）'), beforeLoadText.match(/任务（[^）]*）|Bug（[^）]*）|需求（[^）]*）/g)?.join(' '));
+tree = renderPass(T({ tab: 'task' }));
+await flush();
+ok('有数据时直接显示条数（不显示省略号）', textOf(tree).includes('Bug（1）') && textOf(tree).includes('需求（1）'), textOf(tree).match(/任务（[^）]*）|Bug（[^）]*）|需求（[^）]*）/g)?.join(' '));
+
+// 数据新鲜度：footer 显示「更新于 HH:MM:SS」（Bug/需求有 2 分钟缓存，用户需要知道手里这份多旧）。
+tree = renderPass(T({ tab: 'task' }));
+await flush();
+ok('footer 显示最近取数时间', /更新于 \d{2}:\d{2}:\d{2}/.test(textOf(tree)), textOf(tree).match(/更新于[^）]*\d{2}:\d{2}:\d{2}/)?.[0]);
+ok('CSS：新鲜度那行不会被压缩', /\.dzw-fresh\s*\{[^}]*flex:\s*0 0 auto/.test(cssText), (cssText.match(/\.dzw-fresh\s*\{[^}]*\}/) ?? [''])[0]);
+
+// ---- 渐进扫描：宿主先回首包，客户端轮询增量补齐 ----------------------------
+scanJobMode = true;
+scanPolls.length = 0;
+calls.length = 0;
+hookState.setters = [];
+tree = renderPass(T({ tab: 'bug' }));
+await flush();
+ok('渐进模式：切 Bug 页立刻返回（还没等到轮询就先渲染）', calls.some((entry) => entry.endpoint === 'refresh' && entry.payload.scope === 'bugs') && scanPolls.length === 0, JSON.stringify({ calls: calls.map((entry) => entry.endpoint), polls: scanPolls.length }));
+ok('渐进模式：首包只给空列表 + jobId（不假装扫完了）', calls.find((entry) => entry.endpoint === 'refresh')?.payload.scope === 'bugs' && !calls.some((entry) => entry.endpoint === 'scanProgress'));
+// 进度与首包计数按 state 断言（mock 不重渲染；文本断言用下一趟注入的 preset）。
+const progressSetter = hookState.setters.find((entry) => entry.index === 16 && entry.value !== null);
+ok('渐进模式：登记扫描进度（第 17 个 state）', progressSetter?.value?.total === 2, JSON.stringify(progressSetter?.value));
+tree = renderPass(T({ tab: 'bug', data: { ...loggedInData, bugs: [] }, progress: { done: 0, total: 2, pending: 1 } }));
+await flush();
+ok('渐进模式：显示「正在扫描 0/2 个产品」', textOf(tree).includes('正在扫描 0/2 个产品'), textOf(tree).match(/正在扫描[^）]*/)?.[0]);
+ok('渐进模式：未扫到时计数显示省略号而不是 0', textOf(tree).includes('Bug（…）'), textOf(tree).match(/Bug（[^）]*）/)?.[0]);
+
+// 扫描期间必须**保留**已有列表，不能先闪空再一点点长出来。
+scanPolls.length = 0;
+calls.length = 0;
+hookState.setters = [];
+tree = renderPass(T({ tab: 'bug' }));
+await flush();
+const bugSettersDuringScan = hookState.setters.filter((entry) => entry.index === 8) ?? [];
+ok(
+  '扫描期间保留已有列表（不闪空）',
+  bugSettersDuringScan.every((entry) => (entry.value?.bugs ?? []).length > 0),
+  JSON.stringify(bugSettersDuringScan.map((entry) => entry.value?.bugs?.length)),
+);
+
+await new Promise((resolve) => setTimeout(resolve, 950));
+const pollsAfterFirstWait = scanPolls.length;
+ok('客户端轮询了 scanProgress', pollsAfterFirstWait >= 2 && scanPolls.every((id) => id === 'job-1'), JSON.stringify(scanPolls));
+await new Promise((resolve) => setTimeout(resolve, 600));
+ok('扫完即停：轮询次数不再增长', scanPolls.length === pollsAfterFirstWait, `${pollsAfterFirstWait} → ${scanPolls.length}`);
+ok('轮询到的条目写进第 9 个 state（data.bugs）', hookState.setters.some((entry) => entry.index === 8 && JSON.stringify(entry.value).includes('列表页崩溃')), 'setter 未写入 bugs');
+ok('扫描完成后进度条消失', hookState.setters.some((entry) => entry.index === 16 && entry.value === null), JSON.stringify(hookState.setters.filter((e) => e.index === 16).map((e) => e.value)));
+scanJobMode = false;
+
+// ---- 快照持久化：重启/刷新后先渲染旧数据 -----------------------------------
+localStorageData.clear();
+calls.length = 0;
+tree = renderPass(T({ tab: 'task' }));
+await flush();
+const storedKeys = [...localStorageData.keys()];
+ok('取数成功后写入本地快照', storedKeys.length === 1 && storedKeys[0].startsWith('dsh-zentao-workbench:snapshot:'), JSON.stringify(storedKeys));
+const stored = JSON.parse(localStorageData.get(storedKeys[0]));
+ok('快照带版本号与数据', stored.v === 1 && stored.data.tasks.length === 3, JSON.stringify(Object.keys(stored)));
+// 模拟「重启后首次挂载」：不注入任何 state，靠 getConfig + 快照恢复。
+hookState.setters = [];
+tree = renderPass([]);
+await flush();
+const restoredSetter = hookState.setters.find((entry) => entry.index === 8 && entry.value?.tasks?.length === 3);
+ok('重启后首屏先用本地快照渲染（秒开）', restoredSetter !== undefined, JSON.stringify(hookState.setters.filter((e) => e.index === 8).map((e) => e.value?.tasks?.length)));
+ok('恢复快照后仍然照常刷新（不把旧数据当最终结果）', calls.some((entry) => entry.endpoint === 'refresh'), JSON.stringify(calls.map((entry) => entry.endpoint)));
+
+// 退出登录必须清掉快照，避免换账号后看到上一个人的数据。
+tree = renderPass(T({ tab: 'task' }));
+await flush();
+calls.length = 0;
+findByText(tree, '退出登录').props.onClick();
+await flush(12);
+ok('退出登录清掉本地快照', localStorageData.size === 0, JSON.stringify([...localStorageData.keys()]));
+
+// ---- 任务总量提示：超过 LIST_LIMIT 时必须说清只显示了前 N 条 ----------------
+const overLimit = T({ tab: 'task' });
+overLimit[8] = { ...loggedInData, taskTotal: 88 };
+tree = renderPass(overLimit);
+await flush();
+ok('任务超出列表上限时提示「仅显示前 N 条」', textOf(tree).includes('共 88 条任务，仅显示前 3 条'), textOf(tree).match(/共 \d+ 条任务[^）]*/)?.[0]);
 
 console.log(`\n== 结果：${checks - failures}/${checks} 通过 ==`);
 runCleanups();
