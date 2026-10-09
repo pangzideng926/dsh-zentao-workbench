@@ -163,6 +163,18 @@ transport failure for /zentao-workbench/login: HTTP 405
 
 工具复用浮层那一份登录态，所以**必须先登录**；未登录时返回一句明确的提示而不是报错。取数走 `wait=true` 的同步路径，保证拿到的不是半截数据。
 
+## 密码保存与自动重登
+
+「记住密码」（默认勾选，可取消，也可在面板上一键清除）解决的是「Token 过期要手动重登」这个高频打扰。实现要点：
+
+- **不存明文**。Windows 上经 `ConvertTo-SecureString` + `ConvertFrom-SecureString` 得到 DPAPI 密文，写进 `~/.dsh-zentao-workbench.json`（`0600`）的 `passwordEnc` 字段，`passwordScheme: "dpapi"`。密文绑定**当前用户 + 本机**：换机器 / 换用户 / 文件被改动都解不开，此时按「没存过密码」处理并回退手动登录。
+- **明文只经环境变量传给 PowerShell 子进程**（不出现在命令行里，命令行对本机其它进程可见），得到密文后只在内存里保留一份用于自动重登。
+- **非 Windows 不保存**：没有等价的系统级加密方案时，`protectSecret()` 返回 `undefined`，插件宁可让用户手动登录，也不把密码明文写盘。
+- **子进程优先 `pwsh`，退回 `powershell`**：有的机器上 Windows PowerShell 5.1 的 `Microsoft.PowerShell.Security` 模块缺失，`ConvertFrom-SecureString` 会直接报错。
+- **自动重登**：`requireLogin()` 返回的 profile 上带 `recoverAuth`；`zentaoFetch()` 收到 401（`unauthorized`）时回调它，成功就把新 Token 写回同一个 profile 并**重试一次**原请求 —— 所以 Token 过期在多数情况下对用户完全无感。防抖：同一时刻只跑一次（并发请求共享同一个 in-flight promise），失败后 30 秒内不再尝试，避免把禅道账号撞到锁定。
+- **API 只回布尔值**：`getConfig` / `login` 只返回 `rememberPassword`（是否已保存）与 `rememberToken`，**从不回传** `passwordEnc` 或 `token`。
+- **`forgetPassword`** 端点清空内存与文件里的密码；界面在「已保存密码」那一行提供入口。
+
 ## 登录失效（401）与无权限（403）
 
 禅道的 REST Token 会过期。处理原则是**把「登录失效」当成可恢复状态，而不是错误**：

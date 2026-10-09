@@ -51,7 +51,7 @@ dsh plugin --profile web remove dsh-zentao-workbench
 
 ## 使用
 
-1. **登录**：面板里填禅道地址（可带 `/zentao` 部署路径）、账号 + 密码或 Token。密码永不落盘；勾选「记住 Token」才会把 Token 写进本机配置文件。
+1. **登录**：面板里填禅道地址（可带 `/zentao` 部署路径）、账号 + 密码或 Token。默认勾选**记住密码**（见下），也可以只勾「记住 Token」。
 2. **选发送目标**：默认「跟随当前工作区」（左侧正在看的项目）。有多个工作区时这一行会出现下拉，选中后新会话建在该工作区下，提示词里的工作区段落也会同步替换。
 3. **看条目**：切标签页按需加载（登录后先只拉任务，最快）。条目下方可点「AI 分析」；点标题看详情悬浮卡片。
 4. **开工**：点「处理」→ 新建对话并发送提示词。任务会顺带在禅道里置为「开始」；Bug / 需求不动手。
@@ -59,7 +59,14 @@ dsh plugin --profile web remove dsh-zentao-workbench
 
 > 「刷新」按当前标签页取数：任务页只拉任务（快）；Bug / 需求页需要逐产品聚合。两分钟内的重复刷新直接吃缓存，点「刷新」可强制重拉。
 >
-> **Token 过期不用重启**：禅道的 Token 会过期。一旦失效，面板会从列表自动切回登录表单（服务器/账号已带出）并给一行提示，重新登录即恢复，不会把整个界面卡成只能看的红字报错。
+> **Token 过期基本无感**：禅道的 Token 会过期。勾了「记住密码」时，宿主会用保存的密码**自动重新登录并把失败的请求重试一次**，你通常看不到任何中断；只有自动重登也失败（密码改过、账号被锁）才会切回登录表单，服务器/账号已带出，填一次即可继续。
+
+### 关于「记住密码」
+
+- **默认勾选**，可以在登录表单里取消；登录后也能在面板上点「清除已保存的密码」随时撤销。
+- **不存明文**：Windows 上用 **DPAPI**（`ConvertFrom-SecureString`）加密后写入 `~/.dsh-zentao-workbench.json`（权限 `0600`）。密文只能被**同一个 Windows 用户 + 同一台机器**解开；换机器、换用户、或文件被改动都解不开，插件会当作「没存过密码」，退回手动登录。
+- 非 Windows 平台没有等价的系统级方案，插件**不会**退化成明文保存 —— 勾了也不会存，仍按「Token 过期 → 手动重新登录」处理。
+- 自动重登有防抖：同一时刻只尝试一次，失败后 30 秒内不再重试，避免把账号撞到锁定。
 
 ## 配置
 
@@ -71,7 +78,10 @@ dsh plugin --profile web remove dsh-zentao-workbench
   "account": "your-account",
   "role": "dev",
   "rememberToken": false,
-  "token": ""
+  "token": "",
+  "rememberPassword": true,
+  "passwordScheme": "dpapi",
+  "passwordEnc": "<DPAPI 密文，仅当前 Windows 用户 + 本机可解>"
 }
 ```
 
@@ -83,6 +93,8 @@ dsh plugin --profile web remove dsh-zentao-workbench
 | `DSH_ZENTAO_WORKBENCH_CONFIG` | 覆盖配置文件路径（离线测试用） |
 
 环境变量是**宿主半侧**的，改完要重启 DSH。
+
+配置文件里**没有明文密码**：`passwordEnc` 是 DPAPI 密文，只有当前 Windows 用户在本机解得开；`token` 也只在勾了「记住 Token」时才有值。前端（浏览器半侧）任何接口都拿不到密码或 Token，只能拿到「有没有保存」这两个布尔值。
 
 ## 给模型用的 `zentao` 工具
 

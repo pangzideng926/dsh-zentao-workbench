@@ -199,6 +199,8 @@ const loggedInConfig = {
   realname: '张三',
   role: 'dev',
   rememberToken: true,
+  // 已保存密码（密文只在宿主侧，前端只拿到这个布尔值）
+  rememberPassword: true,
 };
 // 任务故意乱序给出：id 倒序（42 → 11 → 7）由渲染层负责。
 const loggedInData = {
@@ -286,6 +288,7 @@ const rpc = {
     if (endpoint === 'analyze' && analyzeGate !== undefined) await analyzeGate;
     const body = (() => {
       if (endpoint === 'getConfig') return { ok: true, value: loggedInConfig };
+      if (endpoint === 'forgetPassword') return { ok: true, value: { ...loggedInConfig, rememberPassword: false } };
       if (endpoint === 'refresh') {
         // 真实宿主会按 scope 只回对应类别，并回带 scopes 让客户端合并（而不是整体替换）。
         const scope = payload.scope ?? 'all';
@@ -2218,6 +2221,37 @@ await flush(12);
 ok('重新登录会调用 login 端点', calls.some((entry) => entry.endpoint === 'login'), JSON.stringify(calls.map((entry) => entry.endpoint)));
 ok('登录成功后清掉「需要重新登录」状态', hookState.setters.some((entry) => entry.index === 17 && entry.value === false), JSON.stringify(hookState.setters.filter((e) => e.index === 17).map((e) => e.value)));
 ok('登录成功后自动重新拉列表', calls.some((entry) => entry.endpoint === 'refresh' && entry.payload.scope === 'tasks'), JSON.stringify(calls.map((entry) => entry.payload)));
+
+// ---- 「记住密码」：勾选项、默认勾选、已保存提示与清除 -------------------------
+const inputNodes = (t) => {
+  const found = [];
+  walk(t, (node) => {
+    if (typeof node === 'object' && node !== null && node.type === 'input' && node.props?.type === 'checkbox') found.push(node);
+  });
+  return found;
+};
+tree = renderPass(T({ authExpired: true }));
+await flush();
+ok('登录表单有「记住密码」选项', textOf(tree).includes('记住密码（加密后写入本机配置'), textOf(tree).match(/记住密码[^）]*）|记住密码[^\n]{0,40}/)?.[0]);
+const loginCheckboxes = inputNodes(tree);
+ok('默认勾选「记住密码」（第 1 个复选框）并保留「记住 Token」', loginCheckboxes.length >= 2 && loginCheckboxes[0].props.checked === true, JSON.stringify(loginCheckboxes.map((n) => n.props.checked)));
+
+calls.length = 0;
+findByText(tree, '登录').props.onClick();
+await flush(12);
+ok('登录载荷带上 rememberPassword', calls.find((entry) => entry.endpoint === 'login')?.payload?.rememberPassword === true, JSON.stringify(calls.find((entry) => entry.endpoint === 'login')?.payload));
+
+// 已保存密码时：界面明示「Token 过期会自动重登」，并可一键清除。
+tree = renderPass(T({}));
+await flush();
+ok('已保存密码时给出提示', textOf(tree).includes('已保存密码') && textOf(tree).includes('Token 过期会自动重新登录'), textOf(tree).match(/已保存密码[^）]*/)?.[0]);
+calls.length = 0;
+hookState.setters = [];
+findByText(tree, '清除已保存的密码').props.onClick();
+await flush(12);
+ok('点「清除已保存的密码」调 forgetPassword 端点', calls.some((entry) => entry.endpoint === 'forgetPassword'), JSON.stringify(calls.map((entry) => entry.endpoint)));
+ok('清除后界面按未保存密码刷新', hookState.setters.some((entry) => entry.index === 2 && entry.value?.rememberPassword === false), JSON.stringify(hookState.setters.filter((e) => e.index === 2).map((e) => e.value?.rememberPassword)));
+authFails = false;
 
 console.log(`\n== 结果：${checks - failures}/${checks} 通过 ==`);
 runCleanups();

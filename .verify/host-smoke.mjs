@@ -131,6 +131,9 @@ const seen = [];
 /** 扫描类请求的模拟延迟（ms）：见 fetch mock 里 products/{id}/bugs|stories 分支。 */
 const scanDelayMs = 15;
 
+/** 「记住密码」用例：下一次打 tasks/97 时先回一次 401，验证自动重登与重试。 */
+let expireNextToken = false;
+
 globalThis.fetch = async (url, init = {}) => {
   const parsed = new URL(url);
   // 路由判定只看 pathname；query 单独记录（禅道用 ?page=N 表示每页数量）。
@@ -266,6 +269,16 @@ globalThis.fetch = async (url, init = {}) => {
   if (path === 'tasks/98') {
     // 403 = 这次请求没权限（例如某个产品不给看），Token 本身可能还是好的。
     return respond(403, { error: '无权限访问该任务' });
+  }
+  if (path === 'tasks/97') {
+    // 「Token 过期 → 自动重登 → 重试」用例：第一次回 401，之后正常。
+    if (expireNextToken) {
+      expireNextToken = false;
+      return respond(401, { error: 'Unauthorized' });
+    }
+    return respond(200, {
+      task: { id: 97, title: '自动重登后读到的任务', status: 'wait', assignedTo: 'zhangsan', desc: '自动重登验证' },
+    });
   }
   if (path === 'tasks/11') {
     // 形态一：单数键包裹
@@ -824,6 +837,51 @@ const forbidden = await call('fetchDetail', { kind: 'task', id: '98' });
 ok('HTTP 403 归为 forbidden 且不清登录态', forbidden.ok === false && forbidden.error.code === 'forbidden', JSON.stringify(forbidden));
 const stillLoggedIn = await call('getConfig', {});
 ok('403 之后仍保持登录', stillLoggedIn.value?.hasToken === true, JSON.stringify(stillLoggedIn.value));
+
+// ---- 「记住密码」：密文落盘 + Token 过期自动重新登录 -------------------------
+const rememberLogin = await call('login', {
+  server: 'http://zentao.example.com:11180/zentao',
+  account: 'zhangsan',
+  password: 'secret',
+  rememberPassword: true,
+});
+ok('登录时可勾选「记住密码」', rememberLogin.ok === true && rememberLogin.value?.rememberPassword === true, JSON.stringify(rememberLogin.value));
+ok('getConfig 不回传任何密码字段', !('password' in (rememberLogin.value ?? {})) && !('passwordEnc' in (rememberLogin.value ?? {})), JSON.stringify(rememberLogin.value));
+
+if (process.platform === 'win32') {
+  const savedConfig = JSON.parse(readFileSync(process.env.DSH_ZENTAO_WORKBENCH_CONFIG, 'utf8'));
+  ok(
+    '密码以系统加密（DPAPI）密文落盘，不存明文',
+    savedConfig.rememberPassword === true &&
+      savedConfig.passwordScheme === 'dpapi' &&
+      String(savedConfig.passwordEnc).length > 50 &&
+      !JSON.stringify(savedConfig).includes('secret'),
+    JSON.stringify({ scheme: savedConfig.passwordScheme, 密文长度: String(savedConfig.passwordEnc).length }),
+  );
+
+  // Token 过期 → 宿主用已保存的密码自动重登并**重试原来那次请求**，用户无感。
+  expireNextToken = true;
+  const autoRecovered = await call('fetchDetail', { kind: 'task', id: '97' });
+  ok(
+    'Token 过期时自动重新登录并重试成功（界面看不到失效）',
+    autoRecovered.ok === true && autoRecovered.value?.title === '自动重登后读到的任务',
+    JSON.stringify(autoRecovered).slice(0, 200),
+  );
+  const afterAuto = await call('getConfig', {});
+  ok('自动重登后登录态恢复', afterAuto.value?.hasToken === true, JSON.stringify(afterAuto.value));
+
+  const forget = await call('forgetPassword', {});
+  ok('可以清除已保存的密码', forget.ok === true && forget.value?.rememberPassword === false, JSON.stringify(forget.value));
+  const clearedConfig = JSON.parse(readFileSync(process.env.DSH_ZENTAO_WORKBENCH_CONFIG, 'utf8'));
+  ok('清除后配置文件里不再有密文', clearedConfig.rememberPassword === false && clearedConfig.passwordEnc === '', JSON.stringify(clearedConfig));
+  const loginAgain = await call('login', { server: 'http://zentao.example.com:11180/zentao', account: 'zhangsan', password: 'secret', rememberPassword: true });
+  ok('重新登录可再次保存密码（后续用例仍有登录态）', loginAgain.value?.hasToken === true, JSON.stringify(loginAgain.value));
+} else {
+  ok('非 Windows 不支持加密保存：勾了也不会落盘明文', true);
+  const savedConfig = JSON.parse(readFileSync(process.env.DSH_ZENTAO_WORKBENCH_CONFIG, 'utf8'));
+  ok('配置文件里没有明文密码', !JSON.stringify(savedConfig).includes('secret'), JSON.stringify(savedConfig));
+  await call('login', { server: 'http://zentao.example.com:11180/zentao', account: 'zhangsan', password: 'secret' });
+}
 
 // 真实实例形态：空字符串 desc + 正文/附件都在 bugSteps 里
 const realDetail = await call('fetchDetail', { kind: 'task', id: '10004' });
