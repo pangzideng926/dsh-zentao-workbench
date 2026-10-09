@@ -254,6 +254,8 @@ let detailFingerprint = '测试正文指纹';
 /** 渐进扫描模拟开关：开启后 refresh 只回首包 + jobId，由 scanProgress 轮询补齐。 */
 let scanJobMode = false;
 const scanPolls = [];
+/** 模拟禅道 Token 过期：除登录/读配置/退出外的端点全部回 unauthorized。 */
+let authFails = false;
 const analyzeReply = {
   kind: 'task',
   id: '42',
@@ -275,6 +277,11 @@ const rpc = {
   async fetch(url, init) {
     const endpoint = decodeURIComponent(String(url).slice('/zentao-workbench/'.length));
     const payload = JSON.parse(init?.body ?? '{}');
+    if (authFails && endpoint !== 'login' && endpoint !== 'getConfig' && endpoint !== 'logout' && endpoint !== 'scanProgress') {
+      // 模拟 Token 过期：宿主回 unauthorized（可恢复），而不是把 401 当普通错误抛出来。
+      calls.push({ endpoint, url, method: init?.method, headers: init?.headers, credentials: init?.credentials, payload });
+      return { status: 200, async json() { return { ok: false, error: { code: 'unauthorized', message: '禅道登录状态已失效，请重新登录。' } }; } };
+    }
     calls.push({ endpoint, url, method: init?.method, headers: init?.headers, credentials: init?.credentials, payload });
     if (endpoint === 'analyze' && analyzeGate !== undefined) await analyzeGate;
     const body = (() => {
@@ -815,6 +822,7 @@ const T = (over) => [
   null, null, null, null, '',
   over.analyses ?? undefined,
   over.progress ?? undefined,
+  over.authExpired ?? undefined,
 ];
 tree = renderPass(T({}));
 await flush();
@@ -2178,6 +2186,38 @@ overLimit[8] = { ...loggedInData, taskTotal: 88 };
 tree = renderPass(overLimit);
 await flush();
 ok('任务超出列表上限时提示「仅显示前 N 条」', textOf(tree).includes('共 88 条任务，仅显示前 3 条'), textOf(tree).match(/共 \d+ 条任务[^）]*/)?.[0]);
+
+// ---- 登录状态失效（Token 过期）：可恢复，不糊红字、不留死界面 ------------------
+authFails = true;
+hookState.setters = [];
+calls.length = 0;
+tree = renderPass(T({}));
+await flush();
+ok('Token 过期后标记为「需要重新登录」状态（第 18 个 state）', hookState.setters.some((entry) => entry.index === 17 && entry.value === true), JSON.stringify(hookState.setters.filter((e) => e.index === 17).map((e) => e.value)));
+ok('不再把 401 显示成红色错误条', !hookState.setters.some((entry) => entry.index === 5 && String(entry.value).trim() !== ''), JSON.stringify(hookState.setters.filter((e) => e.index === 5).map((e) => e.value)));
+ok('登录失效后不再自动重试刷新', calls.filter((entry) => entry.endpoint === 'refresh').length <= 1, JSON.stringify(calls.map((entry) => entry.endpoint)));
+
+// 这个状态下的界面：中性提示 + 登录表单（服务器/账号已带出），列表与「处理」不再出现。
+tree = renderPass(T({ authExpired: true }));
+await flush();
+const expiredText = textOf(tree);
+ok('给出一行中性提示而不是报错', expiredText.includes('登录状态已失效') && expiredText.includes('请重新登录'), expiredText.match(/禅道登录状态[^。]*。/)?.[0]);
+ok('自动切回登录表单（可直接重新登录）', expiredText.includes('服务器') && expiredText.includes('账号') && findByText(tree, '登录') !== undefined);
+ok('失效时不显示列表与「处理」（避免点半截数据）', findByText(tree, '处理') === undefined && !expiredText.includes('发送目标'));
+ok('失效时「刷新」按钮禁用', findByText(tree, '刷新')?.props?.disabled === true, JSON.stringify(findByText(tree, '刷新')?.props?.disabled));
+
+// 重新登录后立刻恢复：清掉失效标记并重新拉一次列表。
+authFails = false;
+calls.length = 0;
+hookState.setters = [];
+tree = renderPass(T({ authExpired: true }));
+await flush();
+const reloginButton = findByText(tree, '登录');
+reloginButton.props.onClick();
+await flush(12);
+ok('重新登录会调用 login 端点', calls.some((entry) => entry.endpoint === 'login'), JSON.stringify(calls.map((entry) => entry.endpoint)));
+ok('登录成功后清掉「需要重新登录」状态', hookState.setters.some((entry) => entry.index === 17 && entry.value === false), JSON.stringify(hookState.setters.filter((e) => e.index === 17).map((e) => e.value)));
+ok('登录成功后自动重新拉列表', calls.some((entry) => entry.endpoint === 'refresh' && entry.payload.scope === 'tasks'), JSON.stringify(calls.map((entry) => entry.payload)));
 
 console.log(`\n== 结果：${checks - failures}/${checks} 通过 ==`);
 runCleanups();

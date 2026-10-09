@@ -263,6 +263,10 @@ globalThis.fetch = async (url, init = {}) => {
     // 真实实例：Token 失效时 HTTP 401 + {"error":"Unauthorized"}
     return respond(401, { error: 'Unauthorized' });
   }
+  if (path === 'tasks/98') {
+    // 403 = 这次请求没权限（例如某个产品不给看），Token 本身可能还是好的。
+    return respond(403, { error: '无权限访问该任务' });
+  }
   if (path === 'tasks/11') {
     // 形态一：单数键包裹
     return respond(200, {
@@ -802,7 +806,24 @@ ok('形态三 {data:{...}} 解析成功', storyDetail.value?.title === '支持�
 ok('需求取 spec 作为描述', storyDetail.value?.description === '需要支持 xlsx', JSON.stringify(storyDetail.value?.description));
 
 const expired = await call('fetchDetail', { kind: 'task', id: '99' });
-ok('Token 失效（HTTP 401）给出重新登录提示', expired.ok === false && expired.error.message.includes('登录状态已失效'), JSON.stringify(expired));
+ok(
+  'Token 失效（HTTP 401）给可恢复的 unauthorized 错误码',
+  expired.ok === false && expired.error.code === 'unauthorized' && expired.error.message.includes('登录状态已失效'),
+  JSON.stringify(expired),
+);
+ok('接口路径不再糊进用户可见文案', expired.error.message === '禅道登录状态已失效，请重新登录。', expired.error.message);
+// 401 之后宿主必须**就地清掉登录态**（而不是留一个只能看不能用的面板）。
+const afterExpired = await call('getConfig', {});
+ok('Token 失效后 hasToken 变成 false（界面据此切回登录表单）', afterExpired.value?.hasToken === false, JSON.stringify(afterExpired.value));
+const blockedWrite = await call('finishTask', { id: '5003', hours: 1 });
+ok('Token 失效后写操作会被未登录保护拦下', blockedWrite.ok === false && blockedWrite.error.message.includes('未登录'), JSON.stringify(blockedWrite));
+const reloginAfterExpiry = await call('login', { server: 'http://zentao.example.com:11180/zentao', account: 'zhangsan', password: 'secret' });
+ok('重新登录即可恢复（面板不必重启）', reloginAfterExpiry.ok === true && reloginAfterExpiry.value?.hasToken === true, JSON.stringify(reloginAfterExpiry).slice(0, 200));
+// 403 是「这次请求没权限」，Token 可能还是好的，不能连带清登录态。
+const forbidden = await call('fetchDetail', { kind: 'task', id: '98' });
+ok('HTTP 403 归为 forbidden 且不清登录态', forbidden.ok === false && forbidden.error.code === 'forbidden', JSON.stringify(forbidden));
+const stillLoggedIn = await call('getConfig', {});
+ok('403 之后仍保持登录', stillLoggedIn.value?.hasToken === true, JSON.stringify(stillLoggedIn.value));
 
 // 真实实例形态：空字符串 desc + 正文/附件都在 bugSteps 里
 const realDetail = await call('fetchDetail', { kind: 'task', id: '10004' });
