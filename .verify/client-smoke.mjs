@@ -1419,6 +1419,7 @@ ok(
 tree = renderPass([true, undefined, loggedInConfig, undefined, undefined, undefined, undefined, 'bug', loggedInData, detailValue, pdfSetter?.value ?? null]);
 await flush();
 const pdfFrame = findByClass(tree, 'dzw-preview-pdf');
+ok('PDF iframe 不授予脚本或同源权限', pdfFrame?.props?.sandbox === '', JSON.stringify(pdfFrame?.props));
 ok('PDF 预览层出 <iframe class="dzw-preview-pdf">', pdfFrame !== undefined && pdfFrame.type === 'iframe', JSON.stringify(pdfFrame?.type));
 ok(
   'iframe 的 src 走宿主代理（禅道直链不带 Token 只会返回登录页）',
@@ -1704,6 +1705,16 @@ findByText(tree, '确认完成').props.onClick();
 await flush();
 const finishToast = String(hookState.setters.find((entry) => entry.index === 6)?.value ?? '');
 ok('完成：状态没变时提示「状态未变」，不出现「已完成」', finishToast.includes('状态未变') && !finishToast.includes('已完成'), finishToast);
+for (const outcome of ['partial', 'uncertain']) {
+  finishTaskReply = { changed: false, outcome, status: 'done', consumed: 3, note: '工时未确认，请核对后再操作' };
+  tree = renderPass(P({ finishFor: { ...finishValue, hours: '2' } }));
+  await flush();
+  hookState.setters = [];
+  findByText(tree, '确认完成').props.onClick();
+  await flush();
+  ok(`完成 ${outcome}：保留持久错误提示`, hookState.setters.some((entry) => entry.index === 5 && String(entry.value).includes('未确认完成')));
+  ok(`完成 ${outcome}：不显示成功`, !hookState.setters.some((entry) => entry.index === 6 && String(entry.value).includes('已完成')));
+}
 finishTaskReply = { changed: true, previousStatus: 'wait', status: 'done', statusLabel: '已完成', consumed: 5.5, finishedDate: '2026-10-08', note: '' };
 
 // 「取消」关闭卡片。

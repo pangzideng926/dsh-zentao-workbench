@@ -59,7 +59,7 @@ dsh plugin --profile web remove dsh-zentao-workbench
 
 > 「刷新」按当前标签页取数：任务页只拉任务（快）；Bug / 需求页需要逐产品聚合。两分钟内的重复刷新直接吃缓存，点「刷新」可强制重拉。
 >
-> **Token 过期基本无感**：禅道的 Token 会过期。勾了「记住密码」时，宿主会用保存的密码**自动重新登录并把失败的请求重试一次**，你通常看不到任何中断；只有自动重登也失败（密码改过、账号被锁）才会切回登录表单，服务器/账号已带出，填一次即可继续。
+> **读取时自动恢复 Token**：勾了「记住密码」时，宿主会用绑定当前身份的密码自动重登，并将失败的 GET/HEAD 请求重试一次。写请求不会自动重放；写入时遇到 401 会要求重新登录，避免重复登记。
 
 ### 关于「记住密码」
 
@@ -67,6 +67,7 @@ dsh plugin --profile web remove dsh-zentao-workbench
 - **不存明文**：Windows 上用 **DPAPI**（`ConvertFrom-SecureString`）加密后写入 `~/.dsh-zentao-workbench.json`（权限 `0600`）。密文只能被**同一个 Windows 用户 + 同一台机器**解开；换机器、换用户、或文件被改动都解不开，插件会当作「没存过密码」，退回手动登录。
 - 非 Windows 平台没有等价的系统级方案，插件**不会**退化成明文保存 —— 勾了也不会存，仍按「Token 过期 → 手动重新登录」处理。
 - 自动重登有防抖：同一时刻只尝试一次，失败后 30 秒内不再重试，避免把账号撞到锁定。
+- 密码密文绑定服务器地址与账号；切换身份会清除旧密码。旧版未带绑定字段的配置需重新用密码登录一次。退出、切换身份和清除密码会使在途重登失效，旧响应不会恢复登录态。
 
 ## 配置
 
@@ -81,6 +82,8 @@ dsh plugin --profile web remove dsh-zentao-workbench
   "token": "",
   "rememberPassword": true,
   "passwordScheme": "dpapi",
+  "passwordServer": "http://www.example.com:11180/zentao",
+  "passwordAccount": "your-account",
   "passwordEnc": "<DPAPI 密文，仅当前 Windows 用户 + 本机可解>"
 }
 ```
@@ -110,8 +113,10 @@ dsh plugin --profile web remove dsh-zentao-workbench
 
 - 需要 DSH 能访问到你的禅道地址（本机直连或内网可达）。
 - **写操作只有三个，且只对任务有效**：开始 / 完成 / 指派。其它写操作仍由模型按工具调用完成。
-- **「用默认程序打开」会在本机落文件**：附件下载到临时目录再交系统打开（不会自动清理）。扩展名走白名单，`.exe` / `.bat` / `.lnk` 在下载前即被拒绝；请只对你自己认可的附件点这个按钮。
-- **面板的路由没有 DSH 的 admission 门**：`POST /zentao-workbench/*` 只做同源校验（`Origin` / `Sec-Fetch-Site`），**挡不住本机其它进程直接 POST**。它只监听 `127.0.0.1`、且只暴露「读禅道 + 登录」，风险面可控；若不接受这个前提，别在有不可信本地进程的机器上开 DSH。
+- **「用默认程序打开」会在本机落文件**：附件下载到临时目录再交系统打开（不会自动清理）。扩展名走白名单，`.exe` / `.bat` / `.lnk` / `.svg` / `.docm` / `.xlsm` / `.xlsb` 在下载前即被拒绝；HTML/XML/SVG 内容不会交给默认程序。白名单不等于文档安全扫描，请只打开可信附件。
+- **附件边界**：只允许当前禅道部署目录内的附件路径，同源重定向最多三次且逐跳校验。跨源不会转发 Token；登录及写请求不跟随重定向。下载按流限制 64 MiB，最多四个并行下载。HTML/SVG 等主动内容强制下载；图片、音视频与通过文件头检查的 PDF 可内嵌预览，并带隔离响应头。PDF iframe 也受 sandbox 限制，浏览器不支持时可用新窗口链接。
+- **面板的路由没有 DSH 的 admission 门**：`POST /zentao-workbench/*` 只做同源校验（`Origin` / `Sec-Fetch-Site`），**挡不住本机其它进程直接 POST**。路由包含读取、登录、任务写回、模型调用和本机打开附件；监听范围由 DSH 宿主配置决定，插件不强制仅监听 `127.0.0.1`。本轮未新增宿主 admission 集成。
+- **写回结果**：开始须确认 `doing` 且工时未被覆盖，完成须确认 `done` 且累计工时符合预期；部分成功或回读失败会明确提示核对，不自动重放写请求。同一任务的并发写回会被拒绝，避免重复登记。
 - **AI 分析是一次真实模型调用**（输出上限 4000 tokens、超时 60 秒），结论**仅供参考**，提示词里会注明是哪个模型给出的。
 - 拖拽条目到输入框引用（参考实现的 `conversation.input.overlay` 能力）**尚未实现**，当前用「复制提示词 / 处理」两条路径替代。
 
@@ -127,9 +132,10 @@ dsh plugin --profile web remove dsh-zentao-workbench
 ```powershell
 node --check lib/index.js
 node --check lib/client.js
-node .verify/host-smoke.mjs     # 宿主半侧（216 条断言）
-node .verify/client-smoke.mjs   # 浏览器半侧（300 条断言）
-pwsh -File .verify/e2e-check.ps1 # 端到端（另起 19399 实例，跑完自动清理）
+node .verify/host-smoke.mjs     # 宿主半侧（真实 Windows DPAPI 需要可用的用户环境）
+node .verify/client-smoke.mjs   # 浏览器半侧
+node .verify/security-regression.mjs # 离线安全回归；HTTP/DPAPI/opener 都使用替身
+pwsh -File .verify/e2e-check.ps1 # 真实服务验证，包含写接口；仅用于明确授权的测试环境
 ```
 
 改了代码之后：**浏览器半侧刷新页面即可**，**宿主半侧必须重启 DSH**。

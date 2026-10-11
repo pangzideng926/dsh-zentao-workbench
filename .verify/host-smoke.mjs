@@ -149,6 +149,7 @@ globalThis.fetch = async (url, init = {}) => {
     return {
       ok: status >= 200 && status < 300,
       status,
+      body: new ReadableStream({ start(controller) { controller.enqueue(buffer); controller.close(); } }),
       headers: { get: (name) => headers[String(name).toLowerCase()] ?? null },
       text: async () => buffer.toString('utf8'),
       arrayBuffer: async () => buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength),
@@ -369,6 +370,7 @@ globalThis.fetch = async (url, init = {}) => {
     const mp4 = Buffer.alloc(2048, 0x2a);
     return respond(200, mp4, { headers: { 'content-type': 'application/octet-stream' } });
   }
+  if (path === '/zentao/file-read-999999.bin') return respond(200, '', { headers: { 'content-length': String(65 * 1024 * 1024) } });
   if (path.startsWith('/zentao/file-read-')) {
     if (init.headers?.Token !== 'TOKEN-XYZ') {
       // 真实实例行为：没有 Token 头时是 HTTP 200 + 登录页 HTML，浏览器 <img> 只会显示坏图。
@@ -1033,7 +1035,7 @@ const notAttachment = await invokeRpc(`attachment?url=${encodeURIComponent('http
   headers: sameSiteHeaders,
 });
 ok('同源但路径不像附件 → 403', notAttachment.status === 403, JSON.stringify(notAttachment));
-const tooHuge = await invokeRpc(`attachment?url=${encodeURIComponent('http://zentao.example.com:11180/zentao/huge-file-read-1.bin')}`, {
+const tooHuge = await invokeRpc(`attachment?url=${encodeURIComponent('http://zentao.example.com:11180/zentao/file-read-999999.bin')}`, {
   method: 'GET',
   headers: sameSiteHeaders,
 });

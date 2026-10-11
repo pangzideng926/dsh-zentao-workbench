@@ -70,13 +70,22 @@ transport failure for /zentao-workbench/login: HTTP 405
 
 | 路由 | 说明 |
 | --- | --- |
-| `GET /zentao-workbench/attachment?url=<禅道附件地址>` | 用宿主持有的 Token 回源取字节再回吐（`private, max-age=600`、`content-disposition: inline`、支持 `Range`） |
+| `GET /zentao-workbench/attachment?url=<禅道附件地址>` | 用宿主持有的 Token 回源取字节（`private, no-store`、安全媒体 inline，其余强制下载，支持 `Range`；见下方安全契约） |
 
 ## 端点细节
 
 ### `login`
 
-用 `POST api.php/v1/tokens` 换 token，随即 `GET user` 校验；token 与密码二选一。密码永不落盘。
+用 `POST api.php/v1/tokens` 换 token，随即 `GET user` 校验；token 与密码二选一。密码仅允许以绑定服务器与账号的 DPAPI 密文落盘，不保存明文。Token 登录不保存未经密码登录校验的输入密码；旧配置无绑定字段时需重新登录。
+
+### 本轮安全与写回契约
+
+- 宿主为登录身份维护版本与 AbortController。退出、清密码、成功切换登录都会使旧请求失效；重登和手动登录返回时必须核对版本，旧 401 不能清除新身份。
+- REST 与附件请求统一手动处理重定向：GET 最多三次、逐跳同源校验；登录及写请求拒绝重定向。附件每一跳还必须处于当前部署目录内的附件路径。
+- 附件下载按流累计字节，超过 64 MiB 取消读取，最多四路并行；中途失败返回错误信封并释放名额。主动内容强制 `attachment + application/octet-stream`；响应带 CSP sandbox、nosniff 和 `private, no-store`，避免退出后浏览器继续使用旧附件缓存。
+- `startTask` / `finishTask` 返回 `outcome: succeeded|partial|unchanged|uncertain`、`succeeded`、`hoursVerified` 等验证信息；`changed:true` 只表示目标状态及工时均确认成功。写成功但回读失败、传输响应不明确时返回 `uncertain`，不重放写请求。无写入的终态守卫仍保持原 `changed:false + note` 契约。
+- 本轮不改变 AI 缓存、分页和扫描错误展示策略，也不猜测宿主 admission 接口；路由尚无调用者 admission 保护。
+- 新增 `node .verify/security-regression.mjs`，只运行假 HTTP、假 DPAPI 与假 opener，覆盖凭证绑定、身份竞态、重定向、主动内容、流式限额与写后验证；真实 DPAPI 仍由原宿主冒烟单独验证。
 
 ### `refresh`
 
@@ -112,7 +121,7 @@ transport failure for /zentao-workbench/login: HTTP 405
 
 ### `startTask`（写）
 
-`POST tasks/{id}/start`。只对 `wait` 状态动手，先 GET 一次拿 `consumed` / `left` 一起提交（不让禅道把工时覆盖成 0），提交后再 GET 回读状态确认。返回 `{ changed, previousStatus, status, statusLabel, note }`：`changed: false` 表示禅道没改状态（已经是进行中、已完成、或权限不足），界面如实提示而不是谎报成功。
+`POST tasks/{id}/start`。只对 `wait` 状态动手，先 GET 一次拿有效的 `consumed` / `left` 一起提交，回读须确认 `doing` 且工时保持原值。除原字段外返回 `outcome` 与 `hoursVerified`；`changed:false` 也可能表示部分成功或结果不确定，必须显示 `note`，不能笼统认定什么都没改。
 
 ### `finishTask`（写）
 
@@ -122,7 +131,7 @@ transport failure for /zentao-workbench/login: HTTP 405
 { "realStarted": "YYYY-MM-DD", "finishedDate": "YYYY-MM-DD", "currentConsumed": 2, "consumed": 5 }
 ```
 
-`hours` 留空按 0，非数字或负数直接拒绝；`comment` 非空才带。提交后再 GET 回读，返回 `{ changed, previousStatus, status, statusLabel, consumed, left, finishedDate, note }`。
+`hours` 留空按 0，非数字或负数直接拒绝；`comment` 非空才带。提交后再 GET 回读，须确认 `done` 与预期累计工时。返回原字段及 `outcome`、`succeeded`、`hoursVerified`；部分成功或不确定结果要求用户核对，不自动再次登记。
 
 ### `assignTask`（写）
 
@@ -171,7 +180,7 @@ transport failure for /zentao-workbench/login: HTTP 405
 - **明文只经环境变量传给 PowerShell 子进程**（不出现在命令行里，命令行对本机其它进程可见），得到密文后只在内存里保留一份用于自动重登。
 - **非 Windows 不保存**：没有等价的系统级加密方案时，`protectSecret()` 返回 `undefined`，插件宁可让用户手动登录，也不把密码明文写盘。
 - **子进程优先 `pwsh`，退回 `powershell`**：有的机器上 Windows PowerShell 5.1 的 `Microsoft.PowerShell.Security` 模块缺失，`ConvertFrom-SecureString` 会直接报错。
-- **自动重登**：`requireLogin()` 返回的 profile 上带 `recoverAuth`；`zentaoFetch()` 收到 401（`unauthorized`）时回调它，成功就把新 Token 写回同一个 profile 并**重试一次**原请求 —— 所以 Token 过期在多数情况下对用户完全无感。防抖：同一时刻只跑一次（并发请求共享同一个 in-flight promise），失败后 30 秒内不再尝试，避免把禅道账号撞到锁定。
+- **自动重登**：`requireLogin()` 返回的 profile 上带 `recoverAuth`；`zentaoFetch()` 的 GET/HEAD 收到 401 时回调它，成功后重试一次读取。写请求不自动重放。防抖：同一时刻只跑一次，失败后 30 秒内不再尝试；身份版本变化后旧重登结果失效。
 - **API 只回布尔值**：`getConfig` / `login` 只返回 `rememberPassword`（是否已保存）与 `rememberToken`，**从不回传** `passwordEnc` 或 `token`。
 - **`forgetPassword`** 端点清空内存与文件里的密码；界面在「已保存密码」那一行提供入口。
 
@@ -256,8 +265,9 @@ transport failure for /zentao-workbench/login: HTTP 405
 
 ```powershell
 cd E:\Eworkspace\dsh-zentao-workbench\.verify
-node host-smoke.mjs      # 宿主半侧：216/216
-node client-smoke.mjs    # 浏览器半侧：300/300
+node host-smoke.mjs      # 宿主半侧，包含真实 Windows DPAPI 验证
+node client-smoke.mjs    # 浏览器半侧
+node security-regression.mjs # 假 HTTP/DPAPI/opener，安全离线回归
 pwsh -File e2e-check.ps1 # 端到端：另起 19399 实例，复核写端点、附件代理与 bundle 内容（跑完自动清理）
 ```
 
@@ -309,6 +319,8 @@ pwsh -File e2e-check.ps1 # 端到端：另起 19399 实例，复核写端点、�
 - 若设置 `DSH_THEME_BUNDLE=<dsh-client-ui-theme 的 client.js 路径>`，会额外把用到的每个令牌拿到真实主题定义里核对一遍。
 
 ### 端到端复核（`e2e-check.ps1`）
+
+本脚本连接真实服务且会调用写端点，不能视为安全只读测试。“不存在 ID／已关闭任务”的假设可能随环境变化失效；只在明确授权的测试环境运行。本轮安全回归使用 `security-regression.mjs` 的本地替身与 loopback 服务，未运行该脚本。
 
 脚本自己预检 19399 端口、起 web 实例、取日志里的一次性 `?token=` 换 Cookie，然后：
 
