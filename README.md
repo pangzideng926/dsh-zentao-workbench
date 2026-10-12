@@ -64,6 +64,8 @@ dsh plugin --profile web remove dsh-zentao-workbench
 ### 关于「记住密码」
 
 - **默认勾选**，可以在登录表单里取消；登录后也能在面板上点「清除已保存的密码」随时撤销。
+- **重启自动恢复**：只勾「记住密码」即可；重启 DSH 后打开工作台会自动登录，不需要同时保存 Token。密码不会回填到浏览器；同一服务器、同一账号点击「登录」时，密码留空可使用已保存密码。
+- **主动退出会暂停自动登录**，重启后也保持退出；再次点击「登录」后恢复。换服务器或账号时必须提供新凭据，不会复用旧密码。
 - **不存明文**：Windows 上用 **DPAPI**（`ConvertFrom-SecureString`）加密后写入 `~/.dsh-zentao-workbench.json`（权限 `0600`）。密文只能被**同一个 Windows 用户 + 同一台机器**解开；换机器、换用户、或文件被改动都解不开，插件会当作「没存过密码」，退回手动登录。
 - 非 Windows 平台没有等价的系统级方案，插件**不会**退化成明文保存 —— 勾了也不会存，仍按「Token 过期 → 手动重新登录」处理。
 - 自动重登有防抖：同一时刻只尝试一次，失败后 30 秒内不再重试，避免把账号撞到锁定。
@@ -80,6 +82,7 @@ dsh plugin --profile web remove dsh-zentao-workbench
   "rememberToken": false,
   "token": "",
   "rememberPassword": true,
+  "autoLogin": true,
   "passwordScheme": "dpapi",
   "passwordEnc": "<DPAPI 密文，仅当前 Windows 用户 + 本机可解>"
 }

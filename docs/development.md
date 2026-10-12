@@ -76,7 +76,7 @@ transport failure for /zentao-workbench/login: HTTP 405
 
 ### `login`
 
-用 `POST api.php/v1/tokens` 换 token，随即 `GET user` 校验；token 与密码二选一。密码永不落盘。
+用 `POST api.php/v1/tokens` 换 token，随即 `GET user` 校验；token 与密码二选一。密码明文永不落盘。未提供新凭据时，仅允许同一服务器与账号复用已保存密码；Token 登录到另一身份会清除旧密码密文。
 
 ### `refresh`
 
@@ -165,12 +165,14 @@ transport failure for /zentao-workbench/login: HTTP 405
 
 ## 密码保存与自动重登
 
-「记住密码」（默认勾选，可取消，也可在面板上一键清除）解决的是「Token 过期要手动重登」这个高频打扰。实现要点：
+「记住密码」（默认勾选，可取消，也可在面板上一键清除）用于重启恢复登录和 Token 过期后自动重登。实现要点：
 
 - **不存明文**。Windows 上经 `ConvertTo-SecureString` + `ConvertFrom-SecureString` 得到 DPAPI 密文，写进 `~/.dsh-zentao-workbench.json`（`0600`）的 `passwordEnc` 字段，`passwordScheme: "dpapi"`。密文绑定**当前用户 + 本机**：换机器 / 换用户 / 文件被改动都解不开，此时按「没存过密码」处理并回退手动登录。
 - **明文只经环境变量传给 PowerShell 子进程**（不出现在命令行里，命令行对本机其它进程可见），得到密文后只在内存里保留一份用于自动重登。
 - **非 Windows 不保存**：没有等价的系统级加密方案时，`protectSecret()` 返回 `undefined`，插件宁可让用户手动登录，也不把密码明文写盘。
-- **子进程优先 `pwsh`，退回 `powershell`**：有的机器上 Windows PowerShell 5.1 的 `Microsoft.PowerShell.Security` 模块缺失，`ConvertFrom-SecureString` 会直接报错。
+- **子进程使用 PowerShell 7（`pwsh`）**：启用终止式错误处理和 UTF-8 输出；使用 `Console.Write` 原样输出，不能 `trim()` 密码。解密后释放 BSTR，中文及首尾空格都保留。
+- **重启恢复**：`getConfig` 和模型工具首次访问时，若内存 Token 为空且允许自动登录，等待 `autoRelogin()` 再返回状态。沿用现有 DPAPI 密文；旧配置缺少 `autoLogin` 时默认允许恢复。
+- **退出与并发**：`logout` 落盘 `autoLogin: false`，保留加密密码供主动登录使用；手动登录成功重新启用。登录状态版本号阻止退出、清除密码或手动登录后被晚到的自动登录结果覆盖。
 - **自动重登**：`requireLogin()` 返回的 profile 上带 `recoverAuth`；`zentaoFetch()` 收到 401（`unauthorized`）时回调它，成功就把新 Token 写回同一个 profile 并**重试一次**原请求 —— 所以 Token 过期在多数情况下对用户完全无感。防抖：同一时刻只跑一次（并发请求共享同一个 in-flight promise），失败后 30 秒内不再尝试，避免把禅道账号撞到锁定。
 - **API 只回布尔值**：`getConfig` / `login` 只返回 `rememberPassword`（是否已保存）与 `rememberToken`，**从不回传** `passwordEnc` 或 `token`。
 - **`forgetPassword`** 端点清空内存与文件里的密码；界面在「已保存密码」那一行提供入口。
@@ -255,8 +257,10 @@ transport failure for /zentao-workbench/login: HTTP 405
 ### 一键跑
 
 ```powershell
+$ErrorActionPreference = 'Stop'
 cd E:\Eworkspace\dsh-zentao-workbench\.verify
-node host-smoke.mjs      # 宿主半侧：216/216
+node remember-password.mjs # 记住密码专项：Windows + PowerShell 7，真实 DPAPI + 模拟接口
+node host-smoke.mjs      # 宿主半侧
 node client-smoke.mjs    # 浏览器半侧：300/300
 pwsh -File e2e-check.ps1 # 端到端：另起 19399 实例，复核写端点、附件代理与 bundle 内容（跑完自动清理）
 ```
