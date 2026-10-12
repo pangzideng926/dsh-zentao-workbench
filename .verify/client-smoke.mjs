@@ -120,6 +120,10 @@ globalThis.document = {
     const index = list.indexOf(fn);
     if (index >= 0) list.splice(index, 1);
   },
+  dispatchEvent(event) {
+    for (const fn of [...(documentListeners.get(event.type) ?? [])]) fn(event);
+    return true;
+  },
 };
 
 /** 模拟 document 上的键盘事件（用于验证 Esc 关闭弹窗）。 */
@@ -516,7 +520,7 @@ try {
   caught = error;
 }
 ok('apply() 不抛异常', caught === undefined, caught?.stack ?? caught);
-ok('不依赖独立 head 样式 effect', appendedStyles.length === 0);
+ok('Cordis apply 不独立持有 head 样式', appendedStyles.length === 0);
 ok('注册到 shell.overlay', slotHost === 'shell.overlay', slotHost);
 ok('slot 名与 id 正确', slotRegistration?.registration?.name === 'shell.overlay' && slotRegistration.registration.id === 'zentao-workbench', JSON.stringify(slotRegistration?.registration));
 ok('slot order=20', slotRegistration?.registration.order === 20);
@@ -525,9 +529,10 @@ let cssText = '';
 for (const openState of [false, true]) {
   let ownedStyle;
   walk(renderPass([openState]), node => { if (node?.type === 'style') ownedStyle = node; });
-  ok(`面板${openState ? '展开' : '收起'}时自带样式，独立样式清理不使按钮失位`, ownedStyle?.children?.join('').includes('.dzw-launcher'));
+  ok(`面板${openState ? '展开' : '收起'}时自带首屏样式`, ownedStyle?.children?.join('').includes('.dzw-launcher'));
   cssText = ownedStyle?.children?.join('') ?? '';
   ok('组件样式带插件标记', ownedStyle?.props?.['data-plugin-css'] === 'dsh-zentao-workbench');
+  ok(`面板${openState ? '展开' : '收起'}时挂载独立恢复样式`, appendedStyles.at(-1)?.textContent === cssText && !appendedStyles.at(-1)?._removed);
 }
 ok('样式含详情悬浮卡片（无全屏遮罩层）', cssText.includes('.dzw-modal') && !cssText.includes('.dzw-mask'), cssText.slice(0, 200));
 ok('tab 按钮不再被压缩（flex: 1 0 auto + nowrap）', /\.dzw-tab\s*\{[^}]*flex:\s*1 0 auto/.test(cssText) && /\.dzw-tab\s*\{[^}]*white-space:\s*nowrap/.test(cssText), cssText.match(/\.dzw-tab\s*\{[^}]*\}/)?.[0]);
@@ -2264,6 +2269,36 @@ await flush(12);
 ok('点「清除已保存的密码」调 forgetPassword 端点', calls.some((entry) => entry.endpoint === 'forgetPassword'), JSON.stringify(calls.map((entry) => entry.endpoint)));
 ok('清除后界面按未保存密码刷新', hookState.setters.some((entry) => entry.index === 2 && entry.value?.rememberPassword === false), JSON.stringify(hookState.setters.filter((e) => e.index === 2).map((e) => e.value?.rememberPassword)));
 authFails = false;
+
+// 两个插件共用公开的本页展开事件；切换只暂停展示，不清空编辑中的卡片。
+const workbenchEvent = 'dsh-workbench:open';
+tree = renderPass(T({}));
+await flush();
+hookState.setters = [];
+document.dispatchEvent(new CustomEvent(workbenchEvent, { detail: { id: 'gpt-workflow-receiver' } }));
+ok('GPT 展开会收起禅道', hookState.setters.some(e => e.index === 0 && e.value === false));
+ok('GPT 展开会暂停禅道附属卡片', hookState.setters.some(e => e.index === 18 && e.value === true));
+ok('切换不清空禅道编辑草稿', !hookState.setters.some(e => [9, 10, 11, 12].includes(e.index)));
+hookState.setters = [];
+document.dispatchEvent(new CustomEvent(workbenchEvent, { detail: { id: 'unrelated-plugin' } }));
+ok('无关事件不收起禅道', hookState.setters.length === 0);
+let announced = '';
+const captureOpen = event => { announced = event.detail?.id; };
+document.addEventListener(workbenchEvent, captureOpen);
+tree = renderPass([false]);
+await flush();
+let launcher;
+walk(tree, node => { if (node?.props?.className === 'dzw-launcher') launcher = node; });
+launcher.props.onClick();
+// 用下一次渲染执行 open effect，覆盖实际组件接线。
+tree = renderPass([true]);
+await flush();
+ok('禅道展开通知 GPT 收起', announced === 'zentao-workbench', announced);
+walk(tree, node => { if (node?.props?.className === 'dzw-launcher') launcher = node; });
+ok('展开后仍保留可见禅道入口', !launcher.props.style?.opacity && textOf(launcher).includes('禅'));
+document.removeEventListener(workbenchEvent, captureOpen);
+runCleanups();
+ok('卸载解除工作台事件订阅', (documentListeners.get(workbenchEvent) ?? []).length === 0);
 
 console.log(`\n== 结果：${checks - failures}/${checks} 通过 ==`);
 runCleanups();

@@ -300,7 +300,7 @@ pwsh -File e2e-check.ps1 # 端到端：另起 19399 实例，复核写端点、�
 
 用 React/DOM 替身按 `useState` 顺序注入初始 state，mock 出真实服务面（`sessions.list/create/retain/scope`、`workspaces.list`，刻意**没有** `sessions.open` 与 `workspaces.connectWorkspace`），覆盖：
 
-- **加载契约与样式**：模块 id、`inject`、slot 注册、样式只注入一次、`--dsw-*` 令牌白名单、固定高度与内滚动。
+- **加载契约与样式**：模块 id、`inject`、slot 注册、组件首屏样式与恢复样式挂载、`--dsw-*` 令牌白名单、固定高度与内滚动。
 - **首屏**：未登录表单（不再有职位选择）、已登录有数据的渲染与 ID 倒序、`@真名`。
 - **点「处理」**：`uiWorkspace.connectWorkspace` → `retain(source=zentao-workbench)` → `openSession` → `release` → `conversation.send`，提示词含正文、附件、线索、工作区标题与绝对路径；`uiWorkspace` 不可用时降级到 `sessions.create`。
 - **交互安全**：详情失败不发残缺提示词、连续点击只发一次、AI 缓存跨账号/跨服务器/内容变化隔离、刷新后旧分析不回写、刷新不清空已完成预判。
@@ -324,6 +324,18 @@ pwsh -File e2e-check.ps1 # 端到端：另起 19399 实例，复核写端点、�
 - 为避免真的弹出看图软件/播放器，脚本给实例设 `DSH_ZENTAO_WORKBENCH_OPENER=%SystemRoot%\System32\where.exe` 与 `DSH_ZENTAO_WORKBENCH_OPEN_DIR=%TEMP%\dsh-e2e-open`，跑完连同临时目录一起删掉；收尾会 `taskkill /T` 掉整个实例进程树并删除含 token 的日志。
 
 ### 改了代码之后怎么确认生效
+
+#### 浮层样式丢失的回归（2026-10-12）
+
+实机曾出现“禅”按钮仍在无障碍树中，却以无样式小按钮落在窗口左上角；这说明入口已注册，不能仅通过提高 z-index 或重新启用插件解决。当前证据不能确定是哪一次宿主清理移除了样式。
+
+组件内 style 保证首屏显示，另由组件 effect 持有自己的 head 样式节点。MutationObserver 只监听 head 变化并检查该节点，被移除或清空后补回；卸载先断开观察并标记失效，再删除自己的节点。每个实例独立持有节点，旧实例清理不查找或删除新实例、GPT 工作台的样式；没有轮询、没有更改宿主权限或任务状态。
+
+`node --test .verify/style-recovery.mjs` 覆盖删除/清空恢复、外部 GPT 样式保持、新旧实例交错清理、卸载后迟到回调不复活节点；旧实现缺少恢复能力时先失败，实现后 2/2。
+
+与 GPT 工作台通过本页 `document` 的 `dsh-workbench:open` 事件协调，载荷为 `{ id: 'zentao-workbench' | 'gpt-workflow-receiver' }`。只响应对方的已知 ID，打开一方自动收起另一方，卸载解除监听；两个悬浮入口始终保留。禅道附属卡片同步暂停显示，保留编辑草稿，重新展开后恢复，不更改业务任务状态。两插件应同时更新，旧版不识别此事件。
+
+客户端冒烟新增互斥、无关事件、草稿保留、入口可见及卸载清理断言，328/328 通过；GPT 侧共存回归先复现“展开不通知禅道”，修复后全量 56/56。实际 DSH 截图已确认禅道面板和两个右下角入口样式正常，随后用户明确反馈“正常了”。未继续自动逐项操作真机；样式删除与清空恢复是 DOM/Observer 替身测试，不代表全部宿主热重载时序已实测。
 
 > **浏览器半侧的 bundle 是从磁盘现取的**，刷新页面就能换新；**宿主半侧只在进程启动时加载一次**，必须重启 DSH。
 
