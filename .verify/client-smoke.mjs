@@ -429,7 +429,13 @@ const rpc = {
   },
 };
 
-globalThis.fetch = (url, init) => rpc.fetch(url, init);
+const gptCalls=[];
+let gptLinksMock=[], gptApiStatus=200;
+globalThis.fetch = async (url, init) => {
+  if (!String(url).startsWith('/gpt-workflow-view')) return rpc.fetch(url,init);
+  const body=JSON.parse(init?.body || '{}'); gptCalls.push({url,body,headers:init?.headers});
+  return {ok:gptApiStatus===200,status:gptApiStatus,json:async()=>String(url).endsWith('/zentao-links') ? {links:gptLinksMock} : {id:'00000000-0000-5000-a000-000000000042',key:'request:00000000-0000-5000-a000-000000000042',status:'planning'}};
+};
 
 const sentPrompts = [];
 const sessionApi = [];
@@ -2299,6 +2305,42 @@ ok('展开后仍保留可见禅道入口', !launcher.props.style?.opacity && tex
 document.removeEventListener(workbenchEvent, captureOpen);
 runCleanups();
 ok('卸载解除工作台事件订阅', (documentListeners.get(workbenchEvent) ?? []).length === 0);
+
+// 禅道 → GPT 只派协作请求，不调用原「处理」链路的业务写接口。
+tree=renderPass(T({})); await flush();
+const gptButton=findByText(tree,'交给 GPT 开发');
+ok('禅道条目提供交给 GPT 开发入口',gptButton!==undefined);
+if (gptButton) {
+  gptCalls.length=0;calls.length=0;
+  let shown='';const showGpt=e=>{shown=e.detail?.requestId;};document.addEventListener('dsh-gpt:show',showGpt);
+  gptButton.props.onClick();gptButton.props.onClick();await flush(20);
+  const submits=gptCalls.filter(c=>c.url.endsWith('/requests'));
+  ok('连续双击只发送一次协作请求',submits.length===1,submits.length);
+  ok('派单带当前工作区和禅道来源',!!submits[0]?.body.workspace && submits[0]?.body.source?.kind==='task' && !!submits[0]?.body.source?.id,JSON.stringify(submits[0]?.body.source));
+  ok('派单先读取详情并带正文',calls.some(c=>c.endpoint==='fetchDetail') && submits[0]?.body.requirement.includes('### 描述'),submits[0]?.body.requirement);
+  ok('派单不开始、完成或指派禅道任务',!calls.some(c=>['startTask','finishTask','assignTask'].includes(c.endpoint)));
+  ok('派单成功打开原关联总览',shown==='00000000-0000-5000-a000-000000000042',shown);
+  document.removeEventListener('dsh-gpt:show',showGpt);
+  const linked={requestId:shown,source:{kind:'task',id:'42'},status:'completed'};
+  gptLinksMock=[linked];gptCalls.length=0;calls.length=0;
+  tree=renderPass(T({}));await flush();
+  findByText(tree,'交给 GPT 开发').props.onClick();await flush(20);
+  ok('已有关联直接打开，不重复读取详情或派单',!gptCalls.some(c=>c.url.endsWith('/requests')) && !calls.some(c=>c.endpoint==='fetchDetail'));
+  const states=T({});states[19]={'task-42':linked};tree=renderPass(states);await flush();
+  ok('禅道显示待 GPT 审查并提供进度入口',textOf(tree).includes('待 GPT 审查') && !!findByText(tree,'查看 GPT 进度'));
+  gptLinksMock=[];gptApiStatus=404;gptCalls.length=0;tree=renderPass(T({}));await flush();
+  findByText(tree,'交给 GPT 开发').props.onClick();await flush(20);
+  ok('缺少新版接收端时提示安装或重启且不派单',!gptCalls.some(c=>c.url.endsWith('/requests')) && hookState.setters.some(e=>typeof e.value==='string' && /重启|安装/.test(e.value)));
+  gptApiStatus=200;
+  gptCalls.length=0;detailFails=true;tree=renderPass(T({}));await flush();
+  findByText(tree,'交给 GPT 开发').props.onClick();await flush(20);
+  ok('详情读取失败不发送残缺需求',!gptCalls.some(c=>c.url.endsWith('/requests')));
+  detailFails=false;
+  const previousRetained=sessionRows['session-1'].retainedBy;sessionRows['session-1'].retainedBy={};
+  gptCalls.length=0;tree=renderPass(T({}));await flush();findByText(tree,'交给 GPT 开发').props.onClick();await flush(20);
+  ok('无当前工作区不猜测最近项目、不派单',!gptCalls.some(c=>c.url.endsWith('/requests')) && hookState.setters.some(e=>typeof e.value==='string' && e.value.includes('请选择') || typeof e.value==='string' && e.value.includes('请打开当前')));
+  sessionRows['session-1'].retainedBy=previousRetained;
+}
 
 console.log(`\n== 结果：${checks - failures}/${checks} 通过 ==`);
 runCleanups();
