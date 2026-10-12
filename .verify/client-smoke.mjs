@@ -516,14 +516,19 @@ try {
   caught = error;
 }
 ok('apply() 不抛异常', caught === undefined, caught?.stack ?? caught);
-ok('创建了 style 元素', createdStyles.length === 1, createdStyles.length);
-ok('style 带 data-plugin-css 标记', createdStyles[0]?.dataset?.pluginCss === 'dsh-zentao-workbench', JSON.stringify(createdStyles[0]?.dataset));
-ok('style 已插入 head 且内容非空', appendedStyles.length === 1 && appendedStyles[0]._text.includes('.dzw-root'), appendedStyles[0]?._text?.length);
+ok('不依赖独立 head 样式 effect', appendedStyles.length === 0);
 ok('注册到 shell.overlay', slotHost === 'shell.overlay', slotHost);
 ok('slot 名与 id 正确', slotRegistration?.registration?.name === 'shell.overlay' && slotRegistration.registration.id === 'zentao-workbench', JSON.stringify(slotRegistration?.registration));
 ok('slot order=20', slotRegistration?.registration.order === 20);
 ok('注册了 React 组件', typeof slotRegistration.Component === 'function');
-const cssText = appendedStyles[0]?._text ?? '';
+let cssText = '';
+for (const openState of [false, true]) {
+  let ownedStyle;
+  walk(renderPass([openState]), node => { if (node?.type === 'style') ownedStyle = node; });
+  ok(`面板${openState ? '展开' : '收起'}时自带样式，独立样式清理不使按钮失位`, ownedStyle?.children?.join('').includes('.dzw-launcher'));
+  cssText = ownedStyle?.children?.join('') ?? '';
+  ok('组件样式带插件标记', ownedStyle?.props?.['data-plugin-css'] === 'dsh-zentao-workbench');
+}
 ok('样式含详情悬浮卡片（无全屏遮罩层）', cssText.includes('.dzw-modal') && !cssText.includes('.dzw-mask'), cssText.slice(0, 200));
 ok('tab 按钮不再被压缩（flex: 1 0 auto + nowrap）', /\.dzw-tab\s*\{[^}]*flex:\s*1 0 auto/.test(cssText) && /\.dzw-tab\s*\{[^}]*white-space:\s*nowrap/.test(cssText), cssText.match(/\.dzw-tab\s*\{[^}]*\}/)?.[0]);
 ok('附件样式存在', cssText.includes('.dzw-attach'));
@@ -660,9 +665,9 @@ function walk(tree, visit) {
 }
 
 function textOf(tree) {
-  let out = '';
-  walk(tree, (node) => { if (typeof node === 'string' || typeof node === 'number') out += `${String(node)} `; });
-  return out;
+  if (tree == null || typeof tree === 'boolean' || tree.type === 'style') return '';
+  if (typeof tree === 'string' || typeof tree === 'number') return `${tree} `;
+  return (Array.isArray(tree) ? tree : tree.children ?? []).map(textOf).join('');
 }
 
 /** 收集所有带 onClick 的元素（按钮 + 可点击标题）。 */
