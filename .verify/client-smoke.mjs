@@ -2276,71 +2276,15 @@ ok('点「清除已保存的密码」调 forgetPassword 端点', calls.some((ent
 ok('清除后界面按未保存密码刷新', hookState.setters.some((entry) => entry.index === 2 && entry.value?.rememberPassword === false), JSON.stringify(hookState.setters.filter((e) => e.index === 2).map((e) => e.value?.rememberPassword)));
 authFails = false;
 
-// 两个插件共用公开的本页展开事件；切换只暂停展示，不清空编辑中的卡片。
-const workbenchEvent = 'dsh-workbench:open';
-tree = renderPass(T({}));
-await flush();
-hookState.setters = [];
-document.dispatchEvent(new CustomEvent(workbenchEvent, { detail: { id: 'gpt-workflow-receiver' } }));
-ok('GPT 展开会收起禅道', hookState.setters.some(e => e.index === 0 && e.value === false));
-ok('GPT 展开会暂停禅道附属卡片', hookState.setters.some(e => e.index === 18 && e.value === true));
-ok('切换不清空禅道编辑草稿', !hookState.setters.some(e => [9, 10, 11, 12].includes(e.index)));
-hookState.setters = [];
-document.dispatchEvent(new CustomEvent(workbenchEvent, { detail: { id: 'unrelated-plugin' } }));
-ok('无关事件不收起禅道', hookState.setters.length === 0);
-let announced = '';
-const captureOpen = event => { announced = event.detail?.id; };
-document.addEventListener(workbenchEvent, captureOpen);
-tree = renderPass([false]);
-await flush();
-let launcher;
-walk(tree, node => { if (node?.props?.className === 'dzw-launcher') launcher = node; });
-launcher.props.onClick();
-// 用下一次渲染执行 open effect，覆盖实际组件接线。
-tree = renderPass([true]);
-await flush();
-ok('禅道展开通知 GPT 收起', announced === 'zentao-workbench', announced);
-walk(tree, node => { if (node?.props?.className === 'dzw-launcher') launcher = node; });
-ok('展开后仍保留可见禅道入口', !launcher.props.style?.opacity && textOf(launcher).includes('禅'));
-document.removeEventListener(workbenchEvent, captureOpen);
-runCleanups();
-ok('卸载解除工作台事件订阅', (documentListeners.get(workbenchEvent) ?? []).length === 0);
-
-// 禅道 → GPT 只派协作请求，不调用原「处理」链路的业务写接口。
-tree=renderPass(T({})); await flush();
-const gptButton=findByText(tree,'交给 GPT 开发');
-ok('禅道条目提供交给 GPT 开发入口',gptButton!==undefined);
-if (gptButton) {
-  gptCalls.length=0;calls.length=0;
-  let shown='';const showGpt=e=>{shown=e.detail?.requestId;};document.addEventListener('dsh-gpt:show',showGpt);
-  gptButton.props.onClick();gptButton.props.onClick();await flush(20);
-  const submits=gptCalls.filter(c=>c.url.endsWith('/requests'));
-  ok('连续双击只发送一次协作请求',submits.length===1,submits.length);
-  ok('派单带当前工作区和禅道来源',!!submits[0]?.body.workspace && submits[0]?.body.source?.kind==='task' && !!submits[0]?.body.source?.id,JSON.stringify(submits[0]?.body.source));
-  ok('派单先读取详情并带正文',calls.some(c=>c.endpoint==='fetchDetail') && submits[0]?.body.requirement.includes('### 描述'),submits[0]?.body.requirement);
-  ok('派单不开始、完成或指派禅道任务',!calls.some(c=>['startTask','finishTask','assignTask'].includes(c.endpoint)));
-  ok('派单成功打开原关联总览',shown==='00000000-0000-5000-a000-000000000042',shown);
-  document.removeEventListener('dsh-gpt:show',showGpt);
-  const linked={requestId:shown,source:{kind:'task',id:'42'},status:'completed'};
-  gptLinksMock=[linked];gptCalls.length=0;calls.length=0;
-  tree=renderPass(T({}));await flush();
-  findByText(tree,'交给 GPT 开发').props.onClick();await flush(20);
-  ok('已有关联直接打开，不重复读取详情或派单',!gptCalls.some(c=>c.url.endsWith('/requests')) && !calls.some(c=>c.endpoint==='fetchDetail'));
-  const states=T({});states[19]={'task-42':linked};tree=renderPass(states);await flush();
-  ok('禅道显示待 GPT 审查并提供进度入口',textOf(tree).includes('待 GPT 审查') && !!findByText(tree,'查看 GPT 进度'));
-  gptLinksMock=[];gptApiStatus=404;gptCalls.length=0;tree=renderPass(T({}));await flush();
-  findByText(tree,'交给 GPT 开发').props.onClick();await flush(20);
-  ok('缺少新版接收端时提示安装或重启且不派单',!gptCalls.some(c=>c.url.endsWith('/requests')) && hookState.setters.some(e=>typeof e.value==='string' && /重启|安装/.test(e.value)));
-  gptApiStatus=200;
-  gptCalls.length=0;detailFails=true;tree=renderPass(T({}));await flush();
-  findByText(tree,'交给 GPT 开发').props.onClick();await flush(20);
-  ok('详情读取失败不发送残缺需求',!gptCalls.some(c=>c.url.endsWith('/requests')));
-  detailFails=false;
-  const previousRetained=sessionRows['session-1'].retainedBy;sessionRows['session-1'].retainedBy={};
-  gptCalls.length=0;tree=renderPass(T({}));await flush();findByText(tree,'交给 GPT 开发').props.onClick();await flush(20);
-  ok('无当前工作区不猜测最近项目、不派单',!gptCalls.some(c=>c.url.endsWith('/requests')) && hookState.setters.some(e=>typeof e.value==='string' && e.value.includes('请选择') || typeof e.value==='string' && e.value.includes('请打开当前')));
-  sessionRows['session-1'].retainedBy=previousRetained;
-}
+// 停用 GPT 协作后，禅道仍独立处理，不请求旧接口。
+gptCalls.length=0;tree=renderPass(T({}));await flush(20);
+ok('不再显示 GPT 派单入口',!findByText(tree,'交给 GPT 开发'));
+ok('不再显示 GPT 进度入口',!findByText(tree,'查看 GPT 进度'));
+ok('不再查询 GPT 接收端',gptCalls.length===0);
+ok('原处理入口保留',!!findByText(tree,'处理'));
+hookState.setters=[];
+document.dispatchEvent(new CustomEvent('dsh-workbench:open',{detail:{id:'gpt-workflow-receiver'}}));
+ok('旧 GPT 展开事件不影响禅道',hookState.setters.length===0);
 
 console.log(`\n== 结果：${checks - failures}/${checks} 通过 ==`);
 runCleanups();
